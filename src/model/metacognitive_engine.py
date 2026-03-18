@@ -22,6 +22,8 @@ from typing import Optional
 
 import numpy as np
 
+from src.model.composer_cortex import ComposerCortex, DomainMemory
+
 
 PLACEHOLDER_MARKERS = {"[no candidate generated]"}
 STOP_WORDS = {
@@ -110,6 +112,7 @@ class WorkingMemoryState:
     unresolved_tension: float
     task_pressure: float
     remaining_resolution: bool
+    domain_memory: DomainMemory
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +123,7 @@ class WorkingMemoryState:
             "unresolved_tension": round(self.unresolved_tension, 4),
             "task_pressure": round(self.task_pressure, 4),
             "remaining_resolution": self.remaining_resolution,
+            "domain_memory": self.domain_memory.to_dict(),
         }
 
 
@@ -185,6 +189,8 @@ class SelfModel:
         "emotion": 1.00,
         "structure": 0.98,
         "novelty": 0.95,
+        "auditory": 1.02,
+        "template": 1.01,
     })
     recent_confidence: float = 0.60
     recent_conflict: float = 0.20
@@ -224,6 +230,7 @@ class WorkspaceDecision:
     working_memory: WorkingMemoryState
     ranked_candidates: list[WorkspaceCandidate]
     self_model_snapshot: dict
+    hot_trace: dict
 
     def to_dict(self) -> dict:
         return {
@@ -233,6 +240,7 @@ class WorkspaceDecision:
             "working_memory": self.working_memory.to_dict(),
             "ranked_candidates": [candidate.to_dict() for candidate in self.ranked_candidates],
             "self_model_snapshot": self.self_model_snapshot,
+            "hot_trace": self.hot_trace,
         }
 
 
@@ -250,7 +258,10 @@ class MetacognitiveEngine:
             "emotion": 1.10,
             "structure": 1.05,
             "novelty": 0.95,
+            "auditory": 1.08,
+            "template": 1.06,
         }
+        self.cortex = ComposerCortex()
 
     def evaluate_candidates(
         self,
@@ -272,9 +283,10 @@ class MetacognitiveEngine:
             inspected = self._rerank_system2(inspected, context, metacognition)
 
         chosen = self._choose_candidate(inspected)
+        hot_trace = self.cortex.build_hot_trace(chosen, context, working_memory, metacognition)
         self_model.adapt(chosen, metacognition)
 
-        broadcast = self._build_broadcast(chosen, metacognition, context)
+        broadcast = self._build_broadcast(chosen, metacognition, context, hot_trace)
         return WorkspaceDecision(
             chosen_text=chosen.evidence.text,
             broadcast=broadcast,
@@ -282,18 +294,25 @@ class MetacognitiveEngine:
             working_memory=working_memory,
             ranked_candidates=inspected,
             self_model_snapshot=self_model.snapshot(),
+            hot_trace=hot_trace,
         )
 
     def _build_working_memory(self, context: WorkspaceContext) -> WorkingMemoryState:
         bar_position = context.bar_index % 8
+        domain_memory = self.cortex.build_domain_memory(context)
         active_constraints = [
             f"genre={context.genre}",
             f"section={context.section}",
             f"rhyme={context.rhyme_scheme}",
             f"target_syllables={context.target_syllables}",
+            f"motifs={','.join(domain_memory.motif_tokens[:3])}" if domain_memory.motif_tokens else "motifs=establish",
         ]
         if context.target_end_phoneme:
             active_constraints.append("rhyme_resolution_due")
+        if domain_memory.hook_bias >= 0.75:
+            active_constraints.append("hook_memorability")
+        if domain_memory.confessional_bias >= 0.55:
+            active_constraints.append("confessional_pressure")
 
         task_pressure = 0.50
         if context.target_end_phoneme:
@@ -303,6 +322,8 @@ class MetacognitiveEngine:
         if context.section.lower() in {"chorus", "hook", "bridge"}:
             task_pressure += 0.10
         task_pressure += min(context.tension_state * 0.15, 0.15)
+        task_pressure += min(domain_memory.hook_bias * 0.08, 0.08)
+        task_pressure += min(domain_memory.domain_coherence * 0.05, 0.05)
 
         remaining_resolution = bool(context.target_end_phoneme or bar_position in {6, 7})
         return WorkingMemoryState(
@@ -313,6 +334,7 @@ class MetacognitiveEngine:
             unresolved_tension=_clamp(context.tension_state),
             task_pressure=_clamp(task_pressure),
             remaining_resolution=remaining_resolution,
+            domain_memory=domain_memory,
         )
 
     def _inspect_candidate(
@@ -330,6 +352,8 @@ class MetacognitiveEngine:
         coupling_mismatch = (
             abs(modules["emotion"].score - modules["structure"].score) * 0.20
             + abs(modules["phonology"].score - modules["rhythm"].score) * 0.20
+            + abs(modules["auditory"].score - modules["template"].score) * 0.16
+            + abs(modules["template"].score - modules["semantics"].score) * 0.12
         )
         veto_pressure = 0.18 * sum(1 for obs in modules.values() if obs.hard_veto)
         conflict = _clamp(spread * 0.85 + coupling_mismatch + veto_pressure)
@@ -357,8 +381,14 @@ class MetacognitiveEngine:
             for name, obs in sorted(modules.items(), key=lambda item: item[1].score, reverse=True)[:3]
         ]
         weak_modules = [name for name, obs in modules.items() if obs.score < 0.45 or obs.hard_veto]
+        domain_notes = [
+            obs.note for obs in modules.values()
+            if obs.note in {"motif continuity", "confessional fit", "weak auditory gate", "template drift"}
+        ]
         if weak_modules:
             rationale.append("weak=" + ",".join(sorted(weak_modules)))
+        if domain_notes:
+            rationale.append("cortex=" + ",".join(sorted(dict.fromkeys(domain_notes))))
 
         return WorkspaceCandidate(
             evidence=candidate,
@@ -384,6 +414,7 @@ class MetacognitiveEngine:
         content_density = self._content_density(text)
         bar_position = context.bar_index % 8
         rhyme_due = context.target_end_phoneme is not None
+        cortex = self.cortex.evaluate_candidate(text, context, working_memory.domain_memory)
 
         phonology_score = _weighted_mean([
             (candidate.phonetic_score, 0.45 if rhyme_due else 0.20),
@@ -417,11 +448,39 @@ class MetacognitiveEngine:
             (candidate.complexity, 0.25),
             (candidate.internal_rhyme, 0.15),
         ])
+        auditory_score = _weighted_mean([
+            (cortex["auditory_gate"], 0.45),
+            (cortex["motor_fit"], 0.30),
+            (candidate.texture_alignment, 0.25),
+        ])
+        template_score = _weighted_mean([
+            (cortex["template_match"], 0.35),
+            (cortex["confessional_alignment"], 0.20),
+            (cortex["motif_continuity"], 0.15),
+            (working_memory.domain_memory.domain_coherence, 0.15),
+            (semantic_shape, 0.15),
+        ])
 
         phonology_veto = rhyme_due and candidate.phonetic_score < 0.25
         rhythm_veto = (not candidate.syllable_ok) and candidate.stress_alignment < 0.25
         semantics_veto = placeholder or semantic_shape < 0.25
         structure_veto = bar_position in {6, 7} and candidate.temporal_arc < 0.20
+        auditory_veto = not placeholder and cortex["auditory_gate"] < 0.18 and candidate.texture_alignment < 0.30
+        template_veto = (
+            working_memory.domain_memory.domain_coherence > 0.60
+            and cortex["template_match"] < 0.18
+            and context.section.lower() in {"chorus", "hook", "verse1", "verse2"}
+        )
+
+        cortex_note = ""
+        if "weak auditory gate" in cortex["notes"]:
+            cortex_note = "weak auditory gate"
+        elif "template drift" in cortex["notes"]:
+            cortex_note = "template drift"
+        elif "motif continuity" in cortex["notes"]:
+            cortex_note = "motif continuity"
+        elif "confessional fit" in cortex["notes"]:
+            cortex_note = "confessional fit"
 
         return {
             "phonology": ModuleObservation(
@@ -469,6 +528,22 @@ class MetacognitiveEngine:
                 confidence=0.72,
                 weight=self.base_weights["novelty"] * self_model.weight_for("novelty"),
                 note="anti-repetition pressure",
+            ),
+            "auditory": ModuleObservation(
+                module="auditory",
+                score=_clamp(auditory_score),
+                confidence=0.80,
+                weight=self.base_weights["auditory"] * self_model.weight_for("auditory"),
+                note=cortex_note or "auditory hierarchy gate",
+                hard_veto=auditory_veto,
+            ),
+            "template": ModuleObservation(
+                module="template",
+                score=_clamp(template_score),
+                confidence=0.78,
+                weight=self.base_weights["template"] * self_model.weight_for("template"),
+                note=cortex_note or "broca-style template match",
+                hard_veto=template_veto,
             ),
         }
 
@@ -524,6 +599,12 @@ class MetacognitiveEngine:
         if context.target_end_phoneme and top.modules["phonology"].score < 0.55:
             mode = "system2"
             reasons.append("rhyme target not secure")
+        if top.modules["auditory"].hard_veto or top.modules["auditory"].score < 0.40:
+            mode = "system2"
+            reasons.append("auditory gate rejected the line")
+        if top.modules["template"].hard_veto or top.modules["template"].score < 0.42:
+            mode = "system2"
+            reasons.append("template match drifted from song identity")
 
         if not reasons:
             reasons.append("top candidate clears active constraints")
@@ -618,6 +699,7 @@ class MetacognitiveEngine:
         chosen: WorkspaceCandidate,
         metacognition: MetacognitiveState,
         context: WorkspaceContext,
+        hot_trace: dict,
     ) -> str:
         top_modules = sorted(
             chosen.modules.values(),
@@ -625,11 +707,12 @@ class MetacognitiveEngine:
             reverse=True,
         )[:2]
         module_summary = ", ".join(f"{obs.module}:{obs.score:.2f}" for obs in top_modules)
+        next_focus = ", ".join(hot_trace.get("next_focus", [])[:2]) or "maintain flow"
         return (
             f"{metacognition.mode.upper()} broadcast on bar {context.bar_index + 1}: "
             f"'{chosen.evidence.text}' selected with workspace={chosen.workspace_score:.2f}, "
             f"confidence={chosen.confidence:.2f}, conflict={chosen.conflict:.2f}; "
-            f"strongest modules: {module_summary}"
+            f"strongest modules: {module_summary}; next focus: {next_focus}"
         )
 
     def _semantic_shape_score(self, text: str) -> float:
@@ -674,14 +757,18 @@ def summarize_workspace_history(history: list[dict]) -> dict:
             "avg_confidence": 0.0,
             "avg_conflict": 0.0,
             "common_revision_focus": [],
+            "common_hot_focus": [],
             "last_self_model": {},
+            "last_hot_trace": {},
         }
 
     mode_counter: Counter[str] = Counter()
     confidence: list[float] = []
     conflict: list[float] = []
     revision_counter: Counter[str] = Counter()
+    hot_focus_counter: Counter[str] = Counter()
     last_self_model: dict = {}
+    last_hot_trace: dict = {}
 
     for item in history:
         meta = item.get("metacognition", {})
@@ -690,11 +777,16 @@ def summarize_workspace_history(history: list[dict]) -> dict:
         conflict.append(float(meta.get("conflict", 0.0)))
         revision_counter.update(meta.get("revision_focus", []))
         last_self_model = item.get("self_model_snapshot", last_self_model)
+        hot_trace = item.get("hot_trace", {})
+        hot_focus_counter.update(hot_trace.get("next_focus", []))
+        last_hot_trace = hot_trace or last_hot_trace
 
     return {
         "mode_counts": dict(mode_counter),
         "avg_confidence": round(float(np.mean(confidence)), 4) if confidence else 0.0,
         "avg_conflict": round(float(np.mean(conflict)), 4) if conflict else 0.0,
         "common_revision_focus": [name for name, _ in revision_counter.most_common(4)],
+        "common_hot_focus": [name for name, _ in hot_focus_counter.most_common(4)],
         "last_self_model": last_self_model,
+        "last_hot_trace": last_hot_trace,
     }

@@ -143,8 +143,11 @@ def test_metacognitive_engine():
     print(f"  Mode       : {decision.metacognition.mode}")
     print(f"  Confidence : {decision.metacognition.confidence:.3f}")
     print(f"  Chosen     : {decision.chosen_text}")
+    print(f"  HOT trace  : {decision.hot_trace.get('self_statement', '')[:72]}")
     assert decision.chosen_text.startswith("Every scar")
     assert decision.self_model_snapshot["last_mode"] in {"system1", "system2"}
+    assert "domain_memory" in decision.working_memory.to_dict()
+    assert decision.hot_trace["winning_modules"]
     print("  PASS")
 
 
@@ -187,6 +190,11 @@ def test_inference_engine():
     for c in candidates:
         print(f"    [{c.total_score:.2f}] {c.text[:60]}")
     assert len(candidates) > 0
+    assert memory.last_workspace is not None
+    assert "hot_trace" in memory.last_workspace
+    memory.add_line(candidates[0].text, section="verse1")
+    analysis = engine.analyze_song(memory)
+    assert "common_hot_focus" in analysis["metacognition"]
     print("  PASS")
 
 
