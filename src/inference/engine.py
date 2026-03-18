@@ -45,6 +45,13 @@ from src.model.phonosemantic import texture_alignment_score
 from src.model.dopamine_arc import (
     goosebump_potential, hook_dna_score, TensionCurve, analyze_song_dopamine,
 )
+from src.model.metacognitive_engine import (
+    CandidateEvidence,
+    MetacognitiveEngine,
+    SelfModel,
+    WorkspaceContext,
+    summarize_workspace_history,
+)
 from src.model.research_scoring import research_score
 
 
@@ -68,6 +75,9 @@ class SongMemory:
     used_end_phonemes: list[str] = field(default_factory=list)  # to avoid repetition
     tension_curve: TensionCurve = field(default_factory=TensionCurve)
     sections_lines: dict = field(default_factory=dict)  # track lines per section
+    self_model: SelfModel = field(default_factory=SelfModel)
+    workspace_history: list[dict] = field(default_factory=list)
+    last_workspace: Optional[dict] = None
 
     def add_line(self, line: str, section: str = "verse1"):
         self.accepted_lines.append(line)
@@ -139,7 +149,13 @@ class CandidateScore:
     temporal_arc:       float   # 0-1  8-bar position alignment (PMC3498928)
     introspection:      float   # 0-1  confessional content signal
     stress_alignment:   float   # 0-1  motor-rhythm pattern
+    base_score:         float
     total_score:        float
+    workspace_score:    float = 0.0
+    workspace_confidence: float = 0.0
+    workspace_conflict: float = 0.0
+    decision_mode:      str = "system1"
+    decision_trace:     tuple[str, ...] = ()
 
 
 def score_candidate(
@@ -275,6 +291,7 @@ def score_candidate(
         temporal_arc=rs["temporal_arc"],
         introspection=rs["introspection"],
         stress_alignment=rs["stress_alignment"],
+        base_score=float(total),
         total_score=float(total),
     )
 
@@ -294,6 +311,143 @@ class LyricsEngine:
         self.tokenizer = tokenizer
         self.device = device
         self.beam_size = beam_size
+        self.metacognitive_engine = MetacognitiveEngine()
+
+    def _normalize_section_name(self, section: str) -> str:
+        normalized = section.lower().strip("[] ")
+        aliases = {
+            "verse": "verse1",
+            "prechorus": "pre_chorus",
+            "pre-chorus": "pre_chorus",
+            "pre_chorus": "pre_chorus",
+        }
+        return aliases.get(normalized, normalized)
+
+    def _score_candidates(
+        self,
+        candidates: list[str],
+        memory: SongMemory,
+        target_arc_valence: float,
+        target_arc_arousal: float,
+        section: str,
+        line_idx: int,
+    ) -> list[CandidateScore]:
+        return [
+            score_candidate(
+                candidate,
+                memory,
+                target_arc_valence,
+                target_arc_arousal,
+                section=section,
+                mood=memory.mood,
+                tension_state=memory.tension_curve.current,
+                line_idx=line_idx,
+            )
+            for candidate in candidates
+        ]
+
+    def _workspace_context(
+        self,
+        memory: SongMemory,
+        section: str,
+        line_idx: int,
+        target_arc_valence: float,
+        target_arc_arousal: float,
+    ) -> WorkspaceContext:
+        return WorkspaceContext(
+            genre=memory.genre,
+            mood=memory.mood,
+            section=section,
+            bar_index=line_idx,
+            rhyme_scheme=memory.rhyme_scheme,
+            target_end_phoneme=memory.get_target_end_phoneme(),
+            target_syllables=memory.target_syllables,
+            target_arc_valence=target_arc_valence,
+            target_arc_arousal=target_arc_arousal,
+            tension_state=memory.tension_curve.current,
+            accepted_lines=list(memory.accepted_lines),
+        )
+
+    def _rank_with_workspace(
+        self,
+        scored: list[CandidateScore],
+        memory: SongMemory,
+        section: str,
+        line_idx: int,
+        target_arc_valence: float,
+        target_arc_arousal: float,
+    ) -> tuple[list[CandidateScore], dict]:
+        context = self._workspace_context(
+            memory,
+            section=section,
+            line_idx=line_idx,
+            target_arc_valence=target_arc_valence,
+            target_arc_arousal=target_arc_arousal,
+        )
+        decision = self.metacognitive_engine.evaluate_candidates(
+            [
+                CandidateEvidence(
+                    text=item.text,
+                    base_score=item.base_score,
+                    phonetic_score=item.phonetic_score,
+                    syllable_ok=item.syllable_ok,
+                    novelty_score=item.novelty_score,
+                    valence_fit=item.valence_fit,
+                    trajectory_fit=item.trajectory_fit,
+                    texture_alignment=item.texture_alignment,
+                    goosebump=item.goosebump,
+                    hook_dna=item.hook_dna,
+                    polysyllabic_rhyme=item.polysyllabic_rhyme,
+                    internal_rhyme=item.internal_rhyme,
+                    complexity=item.complexity,
+                    temporal_arc=item.temporal_arc,
+                    introspection=item.introspection,
+                    stress_alignment=item.stress_alignment,
+                )
+                for item in scored
+            ],
+            context=context,
+            self_model=memory.self_model,
+        )
+
+        by_text: dict[str, CandidateScore] = {}
+        for item in scored:
+            current = by_text.get(item.text)
+            if current is None or item.base_score > current.base_score:
+                by_text[item.text] = item
+
+        ranked_scores: list[CandidateScore] = []
+        for ranked in decision.ranked_candidates:
+            item = by_text.get(ranked.evidence.text)
+            if item is None:
+                continue
+            item.workspace_score = ranked.workspace_score
+            item.workspace_confidence = ranked.confidence
+            item.workspace_conflict = ranked.conflict
+            item.decision_mode = decision.metacognition.mode
+            item.decision_trace = tuple(ranked.rationale)
+            fused_score = item.base_score * 0.72 + ranked.workspace_score * 0.28
+            if ranked.vetoed:
+                fused_score *= 0.92
+            item.total_score = float(np.clip(fused_score, 0.0, 1.0))
+            ranked_scores.append(item)
+
+        if not ranked_scores:
+            ranked_scores = sorted(scored, key=lambda item: item.total_score, reverse=True)
+
+        return ranked_scores, decision.to_dict()
+
+    def _merge_candidate_pools(
+        self,
+        original: list[CandidateScore],
+        extra: list[CandidateScore],
+    ) -> list[CandidateScore]:
+        merged: dict[str, CandidateScore] = {}
+        for item in original + extra:
+            current = merged.get(item.text)
+            if current is None or item.base_score > current.base_score:
+                merged[item.text] = item
+        return list(merged.values())
 
     @torch.no_grad()
     def generate_candidates(
@@ -399,23 +553,57 @@ class LyricsEngine:
         top_n=1 → auto mode, top_n=3 → co-write mode.
         """
         prompt = memory.build_prompt()
+        section_key = self._normalize_section_name(section)
         candidates = self.generate_candidates(prompt)
 
         line_idx = len(memory.accepted_lines)
-        scored = [
-            score_candidate(
-                c, memory,
-                target_arc_valence, target_arc_arousal,
-                section=section,
-                mood=memory.mood,
-                tension_state=memory.tension_curve.current,
+        scored = self._score_candidates(
+            candidates,
+            memory,
+            target_arc_valence,
+            target_arc_arousal,
+            section=section_key,
+            line_idx=line_idx,
+        )
+        ranked, workspace = self._rank_with_workspace(
+            scored,
+            memory,
+            section=section_key,
+            line_idx=line_idx,
+            target_arc_valence=target_arc_valence,
+            target_arc_arousal=target_arc_arousal,
+        )
+
+        meta = workspace.get("metacognition", {})
+        if meta.get("needs_regeneration"):
+            repair_candidates = self.generate_candidates(
+                prompt,
+                temperature=float(meta.get("suggested_temperature", 0.64)),
+                top_p=0.82,
+            )
+            repair_scored = self._score_candidates(
+                repair_candidates,
+                memory,
+                target_arc_valence,
+                target_arc_arousal,
+                section=section_key,
                 line_idx=line_idx,
             )
-            for c in candidates
-        ]
+            combined = self._merge_candidate_pools(scored, repair_scored)
+            ranked, workspace = self._rank_with_workspace(
+                combined,
+                memory,
+                section=section_key,
+                line_idx=line_idx,
+                target_arc_valence=target_arc_valence,
+                target_arc_arousal=target_arc_arousal,
+            )
 
-        ok = [s for s in scored if s.syllable_ok]
-        ranked = sorted(ok or scored, key=lambda s: s.total_score, reverse=True)
+        memory.last_workspace = workspace
+        memory.workspace_history.append(workspace)
+
+        ok = [item for item in ranked if item.syllable_ok]
+        ranked = ok or ranked
         return ranked[:top_n]
 
     def generate_verse(
@@ -429,6 +617,7 @@ class LyricsEngine:
         """
         Generate a full verse, accepting top-1 each time and updating memory.
         """
+        section_key = self._normalize_section_name(section)
         memory.sections.append((arc_token, section))
 
         # Estimate arc valence from token
@@ -443,15 +632,15 @@ class LyricsEngine:
         target_val, target_aro = arc_valence_map.get(arc_token, (0.0, 0.5))
 
         memory.tension_curve.reset_for_section(section)
-        memory.sections_lines[section] = []
+        memory.sections_lines[section_key] = []
 
         generated_lines = []
         for _ in range(num_lines):
-            top = self.generate_line(memory, target_val, target_aro, top_n=1, section=section)
+            top = self.generate_line(memory, target_val, target_aro, top_n=1, section=section_key)
             if top:
                 best = top[0]
                 if auto_accept:
-                    memory.add_line(best.text, section=section)
+                    memory.add_line(best.text, section=section_key)
                 generated_lines.append(best.text)
 
         return generated_lines
@@ -499,6 +688,8 @@ class LyricsEngine:
             "dopamine_arc":   dopamine_arc,
             "texture_summary": texture_summary,
             "peak_moment": dopamine_arc.get("peak_moment", {}),
+            "metacognition": summarize_workspace_history(memory.workspace_history),
+            "last_workspace": memory.last_workspace,
             "genre": memory.genre,
             "mood":  memory.mood,
         }
