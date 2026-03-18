@@ -320,7 +320,11 @@ def get_target_point(genre: str, section: str) -> EmotionPoint:
     traj = GENRE_TRAJECTORIES.get(genre, _DEFAULT_TRAJ)
     # Normalize section name: verse1, verse2 → verse1
     section_key = section.lower().replace(" ", "_")
-    arr = traj.get(section_key) or traj.get("verse1") or list(traj.values())[0]
+    arr = traj.get(section_key)
+    if arr is None:
+        arr = traj.get("verse1")
+    if arr is None:
+        arr = next(iter(traj.values()))
     return EmotionPoint.from_array(arr)
 
 
