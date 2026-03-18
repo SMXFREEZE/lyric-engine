@@ -1,17 +1,19 @@
 """
-Infinite Genius crawler + HuggingFace dataset pusher.
+Infinite lyrics crawler + HuggingFace dataset pusher.
 
 Flow:
-  seed artists → scrape songs → annotate → save locally → push to HF
+  seed artists → discover songs → fetch lyrics via provider chain
+  → annotate → save locally → push to HF
   → discover similar artists from Genius → add to queue → repeat forever
 
 Usage:
   python scripts/infinite_crawl.py
 
-Env vars required:
-  GENIUS_TOKEN          — from genius.com/api-clients
-  HUGGING_FACE_HUB_TOKEN — from huggingface.co/settings/tokens
-  HF_DATASET_REPO       — e.g. "yourname/god-tier-lyrics" (created automatically)
+Env vars:
+  GENIUS_TOKEN           — optional, helps discovery + direct Genius lookup
+  VAGALUME_API_KEY       — optional, improves lyrics coverage
+  HUGGING_FACE_HUB_TOKEN — optional, for dataset push
+  HF_DATASET_REPO        — optional, e.g. "yourname/god-tier-lyrics"
 """
 
 import json
@@ -30,7 +32,8 @@ from dotenv import load_dotenv
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, MofNCompleteColumn
+
+from src.data.lyrics_providers import fetch_best_lyrics
 
 load_dotenv(Path(__file__).parent.parent / ".env")
 
@@ -39,6 +42,8 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 GENIUS_TOKEN      = os.getenv("GENIUS_TOKEN", "")
 HF_TOKEN          = os.getenv("HUGGING_FACE_HUB_TOKEN", "")
 HF_DATASET_REPO   = os.getenv("HF_DATASET_REPO", "")
+DEEZER_BASE       = "https://api.deezer.com"
+CRAWLER_HEADERS   = {"User-Agent": "LyricEngine/1.0"}
 
 DATA_DIR          = Path("data/crawl")
 SEEN_FILE         = DATA_DIR / "seen_artists.txt"
@@ -84,6 +89,20 @@ def append_line(path: Path, value: str):
 GENIUS_HEADERS = {"Authorization": f"Bearer {GENIUS_TOKEN}"}
 GENIUS_BASE    = "https://api.genius.com"
 
+def deezer_get(endpoint: str, params: dict = {}) -> dict | None:
+    try:
+        r = requests.get(
+            f"{DEEZER_BASE}{endpoint}",
+            params=params,
+            headers=CRAWLER_HEADERS,
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
 def genius_get(endpoint: str, params: dict = {}) -> dict | None:
     try:
         r = requests.get(
@@ -99,21 +118,47 @@ def genius_get(endpoint: str, params: dict = {}) -> dict | None:
         console.print(f"[red]Request error: {e}[/red]")
     return None
 
-def search_artist_id(name: str) -> int | None:
+def search_artist_handle(name: str) -> tuple[str, int] | None:
+    deezer = deezer_get("/search/artist", {"q": name})
+    if deezer:
+        artists = deezer.get("data", [])
+        if artists:
+            artist_id = artists[0].get("id")
+            if artist_id:
+                return ("deezer", artist_id)
+
+    if not GENIUS_TOKEN:
+        return None
+
     data = genius_get("/search", {"q": name})
     if not data:
         return None
     for hit in data.get("hits", []):
         artist = hit.get("result", {}).get("primary_artist", {})
         if artist.get("name", "").lower() == name.lower():
-            return artist["id"]
+            return ("genius", artist["id"])
     # Fallback: first hit's artist
     hits = data.get("hits", [])
     if hits:
-        return hits[0]["result"]["primary_artist"]["id"]
+        return ("genius", hits[0]["result"]["primary_artist"]["id"])
     return None
 
-def get_artist_songs(artist_id: int, max_songs: int = 50) -> list[dict]:
+def get_artist_songs(artist_handle: tuple[str, int], max_songs: int = 50) -> list[dict]:
+    provider, artist_id = artist_handle
+
+    if provider == "deezer":
+        data = deezer_get(f"/artist/{artist_id}/top", {"limit": min(max_songs, 100)})
+        if not data:
+            return []
+        return [
+            {
+                "id": None,
+                "title": track.get("title", ""),
+            }
+            for track in data.get("data", [])
+            if track.get("title")
+        ][:max_songs]
+
     songs = []
     page = 1
     while len(songs) < max_songs:
@@ -134,20 +179,20 @@ def get_artist_songs(artist_id: int, max_songs: int = 50) -> list[dict]:
         time.sleep(SLEEP_BETWEEN)
     return songs[:max_songs]
 
-def get_song_lyrics(song_id: int) -> str | None:
-    """Fetch raw lyrics via lyricsgenius (handles scraping the HTML)."""
-    try:
-        import lyricsgenius
-        genius = lyricsgenius.Genius(GENIUS_TOKEN, verbose=False, remove_section_headers=True, skip_non_songs=True)
-        song = genius.song(song_id)
-        if song and song.lyrics:
-            return clean_lyrics(song.lyrics)
-    except Exception as e:
-        pass
-    return None
+def get_song_lyrics(song_id: int, artist_name: str, song_title: str):
+    """Fetch the best lyrics candidate across all configured providers."""
+    return fetch_best_lyrics(artist_name, song_title, genius_song_id=song_id)
 
-def get_similar_artist_names(artist_id: int) -> list[str]:
+def get_similar_artist_names(artist_handle: tuple[str, int]) -> list[str]:
     """Discover related artists to expand the queue."""
+    provider, artist_id = artist_handle
+
+    if provider == "deezer":
+        data = deezer_get(f"/artist/{artist_id}/related")
+        if not data:
+            return []
+        return [item.get("name", "") for item in data.get("data", []) if item.get("name")]
+
     data = genius_get(f"/artists/{artist_id}/songs", {"per_page": 20, "sort": "popularity"})
     if not data:
         return []
@@ -261,10 +306,6 @@ class Stats:
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    if not GENIUS_TOKEN:
-        console.print("[red bold]GENIUS_TOKEN not set. Add it to your .env file.[/red bold]")
-        sys.exit(1)
-
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 
     seen_artists = load_set(SEEN_FILE)
@@ -311,8 +352,8 @@ def main():
                 continue
 
             # --- Find artist ID ---
-            artist_id = search_artist_id(artist_name)
-            if not artist_id:
+            artist_handle = search_artist_handle(artist_name)
+            if not artist_handle:
                 stats.errors += 1
                 live.update(stats.render())
                 continue
@@ -321,7 +362,7 @@ def main():
             stats.total_artists += 1
 
             # --- Get song list ---
-            songs_meta = get_artist_songs(artist_id, MAX_SONGS_ARTIST)
+            songs_meta = get_artist_songs(artist_handle, MAX_SONGS_ARTIST)
             collected_this_artist = 0
 
             for song_meta in songs_meta:
@@ -338,13 +379,13 @@ def main():
                 stats.last_song = song_title
 
                 # Fetch lyrics
-                lyrics = get_song_lyrics(song_id)
-                if not lyrics:
+                candidate = get_song_lyrics(song_id, artist_name, song_title)
+                if not candidate:
                     stats.lyric_misses += 1
                     live.update(stats.render())
                     continue
 
-                if len(lyrics.split()) < 60:
+                if len(candidate.lyrics.split()) < 60:
                     stats.short_skips += 1
                     seen_songs.add(song_key)
                     append_line(SEEN_SONGS_FILE, song_key)
@@ -355,10 +396,11 @@ def main():
                     "artist":     artist_name,
                     "title":      song_title,
                     "genre":      genre,
-                    "lyrics":     lyrics,
+                    "lyrics":     candidate.lyrics,
                     "genius_id":  song_id,
                     "scraped_at": datetime.utcnow().isoformat(),
                 }
+                record.update(candidate.to_record_fields())
 
                 # Annotate
                 if ANNOTATE:
@@ -388,7 +430,7 @@ def main():
                 append_line(SEEN_FILE, artist_name)
 
             # --- Discover similar artists to expand queue ---
-            new_artists = get_similar_artist_names(artist_id)
+            new_artists = get_similar_artist_names(artist_handle)
             added = 0
             for new_name in new_artists:
                 if new_name and new_name not in seen_artists:

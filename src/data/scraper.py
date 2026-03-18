@@ -1,21 +1,35 @@
 """
-Genius lyrics scraper.
-Uses the lyricsgenius library to pull songs by genre/artist.
+Multi-provider lyrics scraper.
+
+Discovery:
+  1. Deezer artist top tracks (primary, no auth)
+  2. Genius artist songs (fallback, if token works)
+
+Lyrics retrieval:
+  1. Genius direct song lookup
+  2. Vagalume
+  3. LRCLIB
+  4. lyrics.ovh
+  5. Genius search fallback
+
 Output: JSONL files with {artist, title, genre, lyrics} per song.
 """
 
 import os
 import json
 import time
-import re
 from pathlib import Path
 from typing import Optional
 
 import lyricsgenius
+import requests
 from tqdm import tqdm
 
+from src.data.lyrics_providers import fetch_best_lyrics
 
 GENIUS_TOKEN = os.getenv("GENIUS_TOKEN", "")
+DEEZER_BASE = "https://api.deezer.com"
+DEEZER_HEADERS = {"User-Agent": "LyricEngine/1.0"}
 
 # Curated seed artists per genre — add more as needed
 GENRE_SEEDS: dict[str, list[str]] = {
@@ -31,22 +45,99 @@ GENRE_SEEDS: dict[str, list[str]] = {
     "latin":   ["Bad Bunny", "J Balvin", "Ozuna", "Karol G", "Peso Pluma"],
 }
 
+def deezer_get(path: str, params: Optional[dict] = None) -> dict | None:
+    try:
+        response = requests.get(
+            f"{DEEZER_BASE}{path}",
+            params=params or {},
+            headers=DEEZER_HEADERS,
+            timeout=10,
+        )
+        if response.status_code != 200:
+            return None
+        return response.json()
+    except Exception:
+        return None
 
-def clean_lyrics(raw: str) -> str:
-    """Strip Genius annotations, headers, ads, and empty lines."""
-    # Remove [Verse], [Chorus] etc. section headers
-    text = re.sub(r"\[.*?\]", "", raw)
-    # Remove contributor lines
-    text = re.sub(r"\d+ Contributors?.*?Lyrics", "", text, flags=re.DOTALL)
-    # Remove Embed at end
-    text = re.sub(r"\d*Embed$", "", text.strip())
-    # Collapse multiple blank lines
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
+
+def deezer_top_tracks(artist_name: str, limit: int = 50) -> list[dict]:
+    search = deezer_get("/search/artist", {"q": artist_name})
+    if not search:
+        return []
+
+    data = search.get("data") or []
+    if not data:
+        return []
+
+    artist_id = data[0].get("id")
+    if not artist_id:
+        return []
+
+    top = deezer_get(f"/artist/{artist_id}/top", {"limit": min(limit, 100)})
+    tracks = top.get("data") if top else []
+    results = []
+    for track in tracks or []:
+        title = track.get("title")
+        if not title:
+            continue
+        results.append(
+            {
+                "title": title,
+                "deezer_track_id": track.get("id"),
+            }
+        )
+    return results
+
+
+def genius_top_tracks(
+    genius: Optional[lyricsgenius.Genius],
+    artist_name: str,
+    max_songs: int,
+) -> list[dict]:
+    if not genius:
+        return []
+    try:
+        artist = genius.search_artist(artist_name, max_songs=max_songs, sort="popularity")
+        if not artist:
+            return []
+        return [
+            {
+                "title": song.title,
+                "genius_song_id": getattr(song, "id", None),
+            }
+            for song in artist.songs
+            if getattr(song, "title", None)
+        ]
+    except Exception:
+        return []
+
+
+def discover_tracks(
+    genius: Optional[lyricsgenius.Genius],
+    artist_name: str,
+    max_songs: int,
+) -> list[dict]:
+    seen_titles: set[str] = set()
+    tracks: list[dict] = []
+
+    for provider_tracks in (
+        deezer_top_tracks(artist_name, max_songs),
+        genius_top_tracks(genius, artist_name, max_songs),
+    ):
+        for item in provider_tracks:
+            title = item.get("title", "").strip()
+            key = title.lower()
+            if not title or key in seen_titles:
+                continue
+            seen_titles.add(key)
+            tracks.append(item)
+            if len(tracks) >= max_songs:
+                return tracks
+    return tracks
 
 
 def scrape_artist(
-    genius: lyricsgenius.Genius,
+    genius: Optional[lyricsgenius.Genius],
     artist_name: str,
     genre: str,
     max_songs: int = 50,
@@ -55,21 +146,25 @@ def scrape_artist(
     out_dir.mkdir(parents=True, exist_ok=True)
     results = []
     try:
-        artist = genius.search_artist(artist_name, max_songs=max_songs, sort="popularity")
-        if not artist:
+        tracks = discover_tracks(genius, artist_name, max_songs)
+        if not tracks:
             return results
-        for song in artist.songs:
-            if not song.lyrics or len(song.lyrics.split()) < 80:
-                continue
-            lyrics = clean_lyrics(song.lyrics)
-            if len(lyrics.split()) < 80:
+
+        for song in tracks:
+            candidate = fetch_best_lyrics(
+                artist_name,
+                song["title"],
+                genius_song_id=song.get("genius_song_id"),
+            )
+            if not candidate or len(candidate.lyrics.split()) < 80:
                 continue
             record = {
                 "artist": artist_name,
-                "title": song.title,
+                "title": song["title"],
                 "genre": genre,
-                "lyrics": lyrics,
+                "lyrics": candidate.lyrics,
             }
+            record.update(candidate.to_record_fields())
             results.append(record)
     except Exception as e:
         print(f"Error scraping {artist_name}: {e}")
@@ -82,10 +177,9 @@ def run_scrape(
     out_dir: str = "data/raw",
     token: str = GENIUS_TOKEN,
 ):
-    if not token:
-        raise ValueError("Set GENIUS_TOKEN environment variable")
-
-    genius = lyricsgenius.Genius(token, verbose=False, remove_section_headers=True, skip_non_songs=True)
+    genius = None
+    if token:
+        genius = lyricsgenius.Genius(token, verbose=False, remove_section_headers=True, skip_non_songs=True)
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
 
