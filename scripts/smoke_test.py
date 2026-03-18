@@ -74,6 +74,31 @@ def test_phonetic_head():
     print("  PASS")
 
 
+def test_lyrics_provider_ranking():
+    print("\n--Lyrics Provider Ranking --")
+    from src.data.lyrics_providers import LyricsCandidate, rank_lyrics_candidates
+
+    ranked = rank_lyrics_candidates([
+        LyricsCandidate(
+            artist="Test Artist",
+            title="Test Song",
+            lyrics="hello",
+            source="lyrics_ovh",
+            quality_score=0.78,
+        ),
+        LyricsCandidate(
+            artist="Test Artist",
+            title="Test Song",
+            lyrics="Line one of the record\nLine two of the record\nLine three of the record",
+            source="vagalume",
+            quality_score=1.12,
+        ),
+    ])
+    print(f"  Best source : {ranked[0].source}")
+    assert ranked[0].source == "vagalume"
+    print("  PASS")
+
+
 def test_metacognitive_engine():
     print("\n--Metacognitive Engine --")
     from src.model.metacognitive_engine import (
@@ -206,6 +231,7 @@ if __name__ == "__main__":
         test_valence_scorer,
         test_dual_tokenizer,
         test_phonetic_head,
+        test_lyrics_provider_ranking,
         test_metacognitive_engine,
         test_lyrics_model,
         test_inference_engine,
