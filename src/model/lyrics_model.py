@@ -153,15 +153,37 @@ class LyricsModel(nn.Module):
         # If style vector provided, inject as prefix
         inputs_embeds = None
         if style_vec is not None:
-            word_embeds = self.base.get_input_embeddings()(input_ids)  # (B, S, D)
-            style_prefix = self.style_projector(style_vec)              # (B, 1, D)
+            embed_layer = self.base.get_input_embeddings()
+            embed_device = embed_layer.weight.device
+            embed_dtype = embed_layer.weight.dtype
+
+            input_ids = input_ids.to(embed_device)
+            attention_mask = attention_mask.to(embed_device)
+            style_vec = style_vec.to(device=embed_device, dtype=embed_dtype)
+            if labels is not None:
+                labels = labels.to(embed_device)
+
+            self.style_projector = self.style_projector.to(device=embed_device, dtype=embed_dtype)
+            word_embeds = embed_layer(input_ids)                        # (B, S, D)
+            style_prefix = self.style_projector(style_vec).to(word_embeds.dtype)  # (B, 1, D)
             inputs_embeds = torch.cat([style_prefix, word_embeds], dim=1)
             # Extend attention mask for the prefix token
-            prefix_mask = torch.ones(attention_mask.shape[0], 1, device=attention_mask.device)
+            prefix_mask = torch.ones(
+                attention_mask.shape[0],
+                1,
+                device=attention_mask.device,
+                dtype=attention_mask.dtype,
+            )
             attention_mask = torch.cat([prefix_mask, attention_mask], dim=1)
             if labels is not None:
                 prefix_label = torch.full((labels.shape[0], 1), -100, device=labels.device)
                 labels = torch.cat([prefix_label, labels], dim=1)
+        else:
+            model_device = self.base.get_input_embeddings().weight.device
+            input_ids = input_ids.to(model_device)
+            attention_mask = attention_mask.to(model_device)
+            if labels is not None:
+                labels = labels.to(model_device)
 
         out = self.base(
             input_ids=None if inputs_embeds is not None else input_ids,
@@ -180,6 +202,10 @@ class LyricsModel(nn.Module):
         # Phonetic head
         if out.hidden_states:
             last_hidden = out.hidden_states[-1]  # (B, S, D)
+            self.phonetic_head = self.phonetic_head.to(
+                device=last_hidden.device,
+                dtype=last_hidden.dtype,
+            )
             phoneme_logits = self.phonetic_head(last_hidden)
             result["phoneme_logits"] = phoneme_logits
             result["last_hidden"] = last_hidden
