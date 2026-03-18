@@ -74,6 +74,80 @@ def test_phonetic_head():
     print("  PASS")
 
 
+def test_metacognitive_engine():
+    print("\n--Metacognitive Engine --")
+    from src.model.metacognitive_engine import (
+        CandidateEvidence,
+        MetacognitiveEngine,
+        SelfModel,
+        WorkspaceContext,
+    )
+
+    engine = MetacognitiveEngine()
+    self_model = SelfModel()
+    context = WorkspaceContext(
+        genre="hip_hop",
+        mood="dark",
+        section="verse1",
+        bar_index=1,
+        rhyme_scheme="AABB",
+        target_end_phoneme="EY1 T",
+        target_syllables=10,
+        target_arc_valence=0.1,
+        target_arc_arousal=0.6,
+        tension_state=0.45,
+        accepted_lines=["I been movin in silence, they can't feel my weight"],
+    )
+    decision = engine.evaluate_candidates(
+        [
+            CandidateEvidence(
+                text="Every scar on my heart still glow when I create",
+                base_score=0.74,
+                phonetic_score=0.95,
+                syllable_ok=True,
+                novelty_score=0.82,
+                valence_fit=0.70,
+                trajectory_fit=0.78,
+                texture_alignment=0.75,
+                goosebump=0.68,
+                hook_dna=0.58,
+                polysyllabic_rhyme=0.72,
+                internal_rhyme=0.44,
+                complexity=0.69,
+                temporal_arc=0.63,
+                introspection=0.60,
+                stress_alignment=0.72,
+            ),
+            CandidateEvidence(
+                text="[no candidate generated]",
+                base_score=0.20,
+                phonetic_score=0.0,
+                syllable_ok=False,
+                novelty_score=0.0,
+                valence_fit=0.2,
+                trajectory_fit=0.1,
+                texture_alignment=0.1,
+                goosebump=0.0,
+                hook_dna=0.0,
+                polysyllabic_rhyme=0.0,
+                internal_rhyme=0.0,
+                complexity=0.0,
+                temporal_arc=0.0,
+                introspection=0.0,
+                stress_alignment=0.0,
+            ),
+        ],
+        context=context,
+        self_model=self_model,
+    )
+    print(f"  Mode       : {decision.metacognition.mode}")
+    print(f"  Confidence : {decision.metacognition.confidence:.3f}")
+    print(f"  Chosen     : {decision.chosen_text}")
+    assert decision.chosen_text.startswith("Every scar")
+    assert decision.self_model_snapshot["last_mode"] in {"system1", "system2"}
+    print("  PASS")
+
+
 def test_lyrics_model():
     print("\n--Lyrics Model (GPT-2) --")
     import torch
@@ -124,6 +198,7 @@ if __name__ == "__main__":
         test_valence_scorer,
         test_dual_tokenizer,
         test_phonetic_head,
+        test_metacognitive_engine,
         test_lyrics_model,
         test_inference_engine,
     ]
