@@ -49,7 +49,7 @@ def load_base_model(
         bnb_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
-            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_compute_dtype=torch.float16,
             bnb_4bit_use_double_quant=True,
         )
 
@@ -57,16 +57,19 @@ def load_base_model(
         name,
         quantization_config=bnb_config,
         device_map="auto" if torch.cuda.is_available() else None,
-        torch_dtype=torch.float32 if device == "cpu" else torch.bfloat16,
+        low_cpu_mem_usage=True,
+        torch_dtype=torch.float32 if device == "cpu" else torch.float16,
     )
     tokenizer = AutoTokenizer.from_pretrained(name)
     tokenizer.pad_token = tokenizer.eos_token
+    model.config.use_cache = False
 
     # Add special tokens
     new_tokens = [t for t in SPECIAL_TOKENS if t not in tokenizer.get_vocab()]
     if new_tokens:
         tokenizer.add_special_tokens({"additional_special_tokens": new_tokens})
-        model.resize_token_embeddings(len(tokenizer))
+        # Mean-resizing can trigger a large temporary allocation on small GPUs.
+        model.resize_token_embeddings(len(tokenizer), mean_resizing=False)
 
     return model, tokenizer
 
