@@ -236,6 +236,8 @@ class Stats:
         self.since         = datetime.now()
         self.errors        = 0
         self.pushed_to_hf  = 0
+        self.lyric_misses  = 0
+        self.short_skips   = 0
 
     def render(self) -> Table:
         elapsed = (datetime.now() - self.since).seconds
@@ -249,6 +251,8 @@ class Stats:
         t.add_row("Rate",             f"{rate:.1f} songs/min")
         t.add_row("Pushed to HF",     str(self.pushed_to_hf))
         t.add_row("Errors",           str(self.errors))
+        t.add_row("Lyric misses",     str(self.lyric_misses))
+        t.add_row("Short skips",      str(self.short_skips))
         t.add_row("Last artist",      self.last_artist[:40])
         t.add_row("Last song",        self.last_song[:40])
         t.add_row("Running since",    self.since.strftime("%H:%M:%S"))
@@ -313,13 +317,12 @@ def main():
                 live.update(stats.render())
                 continue
 
-            seen_artists.add(artist_name)
-            append_line(SEEN_FILE, artist_name)
-            stats.total_artists += 1
             stats.last_artist = artist_name
+            stats.total_artists += 1
 
             # --- Get song list ---
             songs_meta = get_artist_songs(artist_id, MAX_SONGS_ARTIST)
+            collected_this_artist = 0
 
             for song_meta in songs_meta:
                 if not running:
@@ -336,9 +339,16 @@ def main():
 
                 # Fetch lyrics
                 lyrics = get_song_lyrics(song_id)
-                if not lyrics or len(lyrics.split()) < 60:
+                if not lyrics:
+                    stats.lyric_misses += 1
+                    live.update(stats.render())
+                    continue
+
+                if len(lyrics.split()) < 60:
+                    stats.short_skips += 1
                     seen_songs.add(song_key)
                     append_line(SEEN_SONGS_FILE, song_key)
+                    live.update(stats.render())
                     continue
 
                 record = {
@@ -362,6 +372,7 @@ def main():
                 append_line(SEEN_SONGS_FILE, song_key)
                 buffer.append(record)
                 stats.total_songs += 1
+                collected_this_artist += 1
                 live.update(stats.render())
 
                 # Push to HF every N songs
@@ -371,6 +382,10 @@ def main():
                     buffer = []
 
                 time.sleep(SLEEP_BETWEEN)
+
+            if collected_this_artist > 0 and artist_name not in seen_artists:
+                seen_artists.add(artist_name)
+                append_line(SEEN_FILE, artist_name)
 
             # --- Discover similar artists to expand queue ---
             new_artists = get_similar_artist_names(artist_id)
