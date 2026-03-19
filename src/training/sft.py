@@ -22,6 +22,7 @@ from transformers import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from tqdm import tqdm
 
+from peft import prepare_model_for_kbit_training
 from src.model.checkpoint_loader import load_for_training
 from src.model.lyrics_model import apply_lora, LyricsModel
 from src.model.phonetic_head import phonetic_head_loss
@@ -39,8 +40,8 @@ def train_sft(
     grad_accum_steps: int = 8,
     max_length: int = 512,
     epochs: int = 2,
-    lr: float = 2e-4,
-    lora_rank: int = 64,
+    lr: float = 1e-4,          # was 2e-4; 1e-4 is safer for Mistral 4-bit LoRA
+    lora_rank: int = 32,       # was 64; 32 gives better signal/noise on small Kaggle runs
     alpha: Optional[int] = None,
     use_4bit: bool = True,
     style_vec_dir: Optional[str] = "data/style_vectors",
@@ -66,8 +67,29 @@ def train_sft(
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     base, tokenizer = load_for_training(base_model, use_4bit=use_4bit and device == "cuda")
+
+    # prepare_model_for_kbit_training MUST run before apply_lora on 4-bit models.
+    # It casts non-LoRA weights to float32 for numerically stable gradient flow,
+    # sets up gradient checkpointing in a bitsandbytes-compatible way, and ensures
+    # the embedding layer isn't frozen.  Skipping this is the primary cause of
+    # NaN losses and token-soup outputs with 4-bit training.
+    if use_4bit and device == "cuda":
+        base = prepare_model_for_kbit_training(
+            base,
+            use_gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+        print("  [sft] prepare_model_for_kbit_training applied")
+    else:
+        base.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+
     base = apply_lora(base, rank=lora_rank, alpha=lora_alpha)
-    base.gradient_checkpointing_enable()
+    # gradient_checkpointing_enable is already called inside
+    # prepare_model_for_kbit_training for the 4-bit path; skip the duplicate call.
+    if not (use_4bit and device == "cuda"):
+        base.gradient_checkpointing_enable()
     model = LyricsModel(base, d_model=base.config.hidden_size)
 
     quantized_kaggle_safe = use_4bit and device == "cuda"
@@ -113,47 +135,60 @@ def train_sft(
         pbar = tqdm(train_dl, desc=f"Epoch {epoch+1}/{epochs}", disable=not accelerator.is_main_process)
 
         for step, batch in enumerate(pbar):
-            with accelerator.accumulate(model):
-                # Inject viral DNA: add as a bias to the style vector
-                style_vec = batch.get("style_vec")
-                if viral_conditioning is not None and style_vec is not None:
-                    viral_t = torch.tensor(viral_conditioning, dtype=style_vec.dtype, device=style_vec.device)
-                    # Pad/trim viral vector to match style vec dim
-                    sv_dim = style_vec.shape[-1]
-                    v_dim  = viral_t.shape[0]
-                    if v_dim < sv_dim:
-                        viral_t = torch.nn.functional.pad(viral_t, (0, sv_dim - v_dim))
-                    else:
-                        viral_t = viral_t[:sv_dim]
-                    style_vec = style_vec + 0.1 * viral_t.unsqueeze(0)
+            # For the quantized Kaggle path the model is NOT prepared by accelerator,
+            # so accelerator.accumulate(model) cannot track sync boundaries correctly.
+            # Use a manual step-based accumulation check instead.
+            is_accumulation_step = ((step + 1) % grad_accum_steps != 0) and (step + 1 < len(train_dl))
 
-                out = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    phoneme_ids=batch.get("phoneme_ids"),
-                    style_vec=style_vec,
-                    labels=batch["labels"],
-                )
+            # Inject viral DNA: add as a bias to the style vector
+            style_vec = batch.get("style_vec")
+            if viral_conditioning is not None and style_vec is not None:
+                viral_t = torch.tensor(viral_conditioning, dtype=style_vec.dtype, device=style_vec.device)
+                sv_dim = style_vec.shape[-1]
+                v_dim  = viral_t.shape[0]
+                if v_dim < sv_dim:
+                    viral_t = torch.nn.functional.pad(viral_t, (0, sv_dim - v_dim))
+                else:
+                    viral_t = viral_t[:sv_dim]
+                style_vec = style_vec + 0.1 * viral_t.unsqueeze(0)
 
-                loss = out["lm_loss"]
+            out = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                phoneme_ids=batch.get("phoneme_ids"),
+                style_vec=style_vec,
+                labels=batch["labels"],
+            )
 
-                # Add phonetic head loss if available
-                if "phoneme_logits" in out and "phoneme_ids" in batch:
-                    ph_loss = phonetic_head_loss(out["phoneme_logits"], batch["phoneme_ids"])
+            loss = out["lm_loss"]
+
+            # Guard against NaN loss (can occur early in 4-bit training)
+            if torch.isnan(loss) or torch.isinf(loss):
+                print(f"  [sft] WARNING: NaN/Inf loss at step {step}, skipping batch")
+                optimizer.zero_grad()
+                continue
+
+            # Add phonetic head loss if available
+            if "phoneme_logits" in out and "phoneme_ids" in batch:
+                ph_loss = phonetic_head_loss(out["phoneme_logits"], batch["phoneme_ids"])
+                if not (torch.isnan(ph_loss) or torch.isinf(ph_loss)):
                     loss = loss + phonetic_loss_weight * ph_loss
 
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
+            # Scale loss for gradient accumulation
+            scaled_loss = loss / grad_accum_steps
+            accelerator.backward(scaled_loss)
+
+            if not is_accumulation_step:
+                accelerator.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
 
-                global_step += 1
-                total_loss += loss.item()
+            global_step += 1
+            total_loss += loss.item()
 
-                if accelerator.is_main_process:
-                    pbar.set_postfix({"loss": f"{loss.item():.4f}", "step": global_step})
+            if accelerator.is_main_process:
+                pbar.set_postfix({"loss": f"{loss.item():.4f}", "step": global_step})
 
         # Validation
         if val_dl:

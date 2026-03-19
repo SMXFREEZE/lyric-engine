@@ -70,32 +70,73 @@ def split_into_sections(lyrics: str) -> list[tuple[str, list[str]]]:
     return sections if sections else [("VERSE", [l.strip() for l in lyrics.splitlines() if l.strip()])]
 
 
+# Instruction prefix template for Mistral-Instruct.
+# Training wraps data in [INST]...[/INST] so the base model's instruction-following
+# alignment helps rather than fights fine-tuning.  Labels for instruction tokens
+# are set to -100 so loss is only computed on the lyric completion.
+_INST_OPEN  = "[INST]"
+_INST_CLOSE = "[/INST]"
+
+# Stop words excluded from call_echo overlap ratio to avoid false positives
+# on function-word-heavy lines like "I was lost / I was found".
+_STOP_WORDS_ECHO = {
+    "i", "you", "he", "she", "we", "they", "it", "me", "my", "your",
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
+    "for", "of", "with", "by", "from", "is", "was", "are", "were",
+    "be", "been", "have", "had", "do", "did", "not", "no", "so",
+    "that", "this", "just", "like", "get", "got", "will", "can",
+}
+
+
+def _build_instruction(genre: str, sections: list[tuple[str, list[str]]]) -> str:
+    """Build the [INST] instruction prefix for a training example."""
+    structure = " → ".join(
+        f"[{name}]" if f"[{name}]" in SECTION_TOKENS else "[VERSE]"
+        for name, _ in sections
+    )
+    return f"{_INST_OPEN} Write {genre} lyrics ({structure}): {_INST_CLOSE}"
+
+
 def format_training_example(
     record: dict,
     style_vec: Optional[np.ndarray] = None,
-) -> str:
+) -> tuple[str, int]:
     """
-    Format a song record into the training text format.
+    Format a song record into the Mistral-instruct training format.
+
+    Returns
+    -------
+    (full_text, instruction_char_len)
+        ``instruction_char_len`` is the number of characters in the
+        ``[INST]…[/INST]`` prefix so the caller can mask those tokens.
     """
     genre = record.get("genre", "hip_hop")
     lyrics = record.get("lyrics", "")
     sections = split_into_sections(lyrics)
 
-    # Compute arc tokens per section
-    arc_tokens = compute_song_arc([lines for _, lines in sections])
+    # Compute arc tokens per section — guarded: malformed lyrics can raise
+    try:
+        arc_tokens = compute_song_arc([lines for _, lines in sections])
+    except Exception:
+        arc_tokens = ["[SETUP]"] * len(sections)
 
-    parts = [f"[GENRE_START] {genre} [GENRE_END]"]
+    # Build the Mistral-instruct instruction header
+    instruction = _build_instruction(genre, sections)
+    instruction_char_len = len(instruction)
+
+    # Build the completion (everything the model should learn to generate)
+    completion_parts = [f"[GENRE_START] {genre} [GENRE_END]"]
     if style_vec is not None:
-        # We represent style vector as a compact token — actual injection
-        # happens at embedding level, not text level
-        parts.append("[STYLE_START] [STYLE_END]")
+        completion_parts.append("[STYLE_START] [STYLE_END]")
 
     for (section_name, lines), arc in zip(sections, arc_tokens):
         section_tok = f"[{section_name}]" if f"[{section_name}]" in SECTION_TOKENS else "[VERSE]"
-        parts.append(f"{section_tok} {arc}")
-        parts.extend(lines)
+        completion_parts.append(f"{section_tok} {arc}")
+        completion_parts.extend(lines)
 
-    return "\n".join(parts)
+    completion = "\n".join(completion_parts)
+    full_text = f"{instruction}\n{completion}"
+    return full_text, instruction_char_len
 
 
 class LyricsDataset(Dataset):
@@ -145,7 +186,7 @@ class LyricsDataset(Dataset):
         record = self.records[idx]
         style_vec = self._load_style_vec(record.get("artist", ""))
 
-        text = format_training_example(record, style_vec)
+        text, instruction_char_len = format_training_example(record, style_vec)
         enc = self.tokenizer(
             text,
             max_length=self.max_length,
@@ -156,7 +197,21 @@ class LyricsDataset(Dataset):
         input_ids = enc["input_ids"].squeeze(0)
         attention_mask = enc["attention_mask"].squeeze(0)
         labels = input_ids.clone()
+
+        # Mask padding tokens
         labels[attention_mask == 0] = -100
+
+        # Mask instruction prefix tokens — only compute loss on the lyric completion.
+        # Encode the instruction prefix alone (no padding) to measure its token length.
+        instruction_prefix = text[:instruction_char_len]
+        prefix_ids = self.tokenizer(
+            instruction_prefix,
+            add_special_tokens=True,
+            return_tensors="pt",
+        )["input_ids"].squeeze(0)
+        n_prefix = len(prefix_ids)
+        if n_prefix < self.max_length:
+            labels[:n_prefix] = -100
 
         # Build phoneme IDs
         words = text.split()

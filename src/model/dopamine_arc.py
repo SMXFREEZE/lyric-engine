@@ -220,13 +220,23 @@ def detect_hook_patterns(line: str, previous_line: Optional[str] = None) -> list
     if _has_time_markers(line):
         detected.append("time_compression")
 
-    # Call+echo: current line repeats key phrase from previous line with modification
+    # Call+echo: current line repeats key *content* words from previous line
+    # with modification.  Filter stop words before computing overlap so
+    # function-word-heavy lines ("I was lost / I was found") don't false-fire.
     if previous_line:
-        prev_words = set(previous_line.lower().split())
-        curr_words = set(line.lower().split())
-        overlap_ratio = len(prev_words & curr_words) / max(len(prev_words), 1)
-        if 0.3 < overlap_ratio < 0.7:  # partial repeat = call+echo
-            detected.append("call_echo")
+        _stop = {
+            "i", "you", "he", "she", "we", "they", "it", "me", "my", "your",
+            "the", "a", "an", "and", "or", "but", "in", "on", "at", "to",
+            "for", "of", "with", "by", "from", "is", "was", "are", "were",
+            "be", "been", "have", "had", "do", "did", "not", "no", "so",
+            "that", "this", "just", "like", "get", "got", "will", "can",
+        }
+        prev_content = {w for w in previous_line.lower().split() if w not in _stop}
+        curr_content = {w for w in line.lower().split() if w not in _stop}
+        if prev_content and curr_content:
+            overlap_ratio = len(prev_content & curr_content) / max(len(prev_content), 1)
+            if 0.3 < overlap_ratio < 0.7:
+                detected.append("call_echo")
 
     return list(set(detected))
 

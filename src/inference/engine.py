@@ -151,8 +151,24 @@ class SongMemory:
         return None
 
     def build_prompt(self) -> str:
-        """Build the full generation prompt from memory."""
+        """Build the generation prompt in Mistral-instruct format.
+
+        Training wraps data as ``[INST] … [/INST]{completion}``, so inference
+        must use the same format.  The model generates everything after
+        ``[/INST]``, which is where the genre header and accepted lines live.
+        """
         parts: list[str] = []
+
+        # Determine section structure for the instruction prefix
+        if self.sections:
+            arc, section = self.sections[-1]
+            structure_hint = f"[{section}]"
+        else:
+            structure_hint = "[VERSE]"
+
+        instruction = f"[INST] Write {self.genre} lyrics ({structure_hint}): [/INST]"
+        parts.append(instruction)
+
         # Style DNA prefix for richer prompting
         if self.style_dna is not None and _HAS_STYLE_DNA:
             try:
@@ -606,6 +622,8 @@ class LyricsEngine:
             "pad_token_id": self.tokenizer.eos_token_id,
             "remove_invalid_values": True,
             "renormalize_logits": True,
+            "repetition_penalty": 1.15,      # penalise token repetition in all phases
+            "no_repeat_ngram_size": 3,       # block exact n-gram repeats
         }
         if eos is not None:
             common_generate_kwargs["eos_token_id"] = eos
