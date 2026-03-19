@@ -284,15 +284,34 @@ def test_style_dna_basics():
 
 
 def test_style_dna_song_memory():
-    print("\n-- Style DNA → SongMemory Integration --")
+    print("\n-- Style DNA -> SongMemory Integration --")
     from src.data.style_dna import STYLES
     from src.inference.engine import SongMemory
-    # Verify that SongMemory can accept style_dna field
+
     trap_dna = STYLES["trap"]
-    memory = SongMemory(genre="trap", style_dna=trap_dna)
-    assert memory.style_dna is not None
-    assert memory.style_dna.typical_bpm == 140
-    print(f"  SongMemory with style_dna: genre={memory.genre}, bpm={memory.style_dna.typical_bpm}")
+    auto_memory = SongMemory(genre="trap", style_dna=trap_dna)
+    assert auto_memory.style_dna is not None
+    assert auto_memory.style_dna.typical_bpm == 140
+    assert auto_memory.target_syllables == round(trap_dna.avg_syllables_per_line)
+    assert auto_memory.rhyme_scheme == trap_dna.rhyme_schemes[0]
+
+    explicit_memory = SongMemory(
+        genre="trap",
+        style_dna=trap_dna,
+        target_syllables=10,
+        rhyme_scheme="AABB",
+    )
+    assert explicit_memory.target_syllables == 10
+    assert explicit_memory.rhyme_scheme == "AABB"
+
+    print(
+        "  Auto defaults:",
+        f"syllables={auto_memory.target_syllables}, rhyme={auto_memory.rhyme_scheme}",
+    )
+    print(
+        "  Explicit preserved:",
+        f"syllables={explicit_memory.target_syllables}, rhyme={explicit_memory.rhyme_scheme}",
+    )
     print("  PASS")
 
 
@@ -303,9 +322,12 @@ def test_genre_style_sync():
     # Every genre in GENRES should have a description
     missing_desc = [g for g in GENRES if g not in GENRE_DESCRIPTIONS]
     assert not missing_desc, f"Missing descriptions: {missing_desc}"
-    # Check that we have reasonable coverage
-    assert len(GENRES) >= 10, f"Only {len(GENRES)} genres configured"
-    assert len(STYLES) >= 20, f"Only {len(STYLES)} styles in style_dna"
+
+    genres_not_in_styles = sorted(set(GENRES) - set(STYLES))
+    styles_not_in_genres = sorted(set(STYLES) - set(GENRES))
+    assert not genres_not_in_styles, f"Genres missing StyleDNA entries: {genres_not_in_styles}"
+    assert not styles_not_in_genres, f"StyleDNA entries missing from GENRES: {styles_not_in_genres}"
+
     print(f"  GENRES: {len(GENRES)} configured")
     print(f"  STYLES: {len(STYLES)} defined in style_dna")
     print("  PASS")
@@ -313,7 +335,13 @@ def test_genre_style_sync():
 
 def test_api_schema():
     print("\n-- API Schema Validation --")
-    from src.api.server import GenerateRequest, CoWriteStartRequest, SuggestRequest
+    from fastapi import HTTPException
+    from src.api.server import (
+        CoWriteStartRequest,
+        GenerateRequest,
+        SuggestRequest,
+        _validate_genre_name,
+    )
     # Verify request models can be instantiated with defaults
     gen = GenerateRequest()
     assert gen.genre == "hip_hop"
@@ -322,9 +350,17 @@ def test_api_schema():
     assert co.genre == "hip_hop"
     sug = SuggestRequest(session_id="test-123")
     assert sug.n == 3
+    assert _validate_genre_name("trap") == "trap"
+    try:
+        _validate_genre_name("not_a_real_genre")
+    except HTTPException as exc:
+        assert exc.status_code == 400
+    else:
+        raise AssertionError("Expected HTTPException for invalid genre")
     print("  GenerateRequest defaults OK")
     print("  CoWriteStartRequest defaults OK")
     print("  SuggestRequest defaults OK")
+    print("  Genre validation OK")
     print("  PASS")
 
 

@@ -63,6 +63,9 @@ except ImportError:
     StyleDNA = None  # type: ignore
 
 
+_AUTO_DEFAULT = object()
+
+
 # ── Syllable counter (deterministic, no LLM) ─────────────────────────────────
 
 def count_syllables(line: str) -> int:
@@ -78,8 +81,8 @@ class SongMemory:
     style_vec: Optional[np.ndarray] = None  # (128,)
     sections: list[tuple[str, str]] = field(default_factory=list)  # (arc_token, section_name)
     accepted_lines: list[str] = field(default_factory=list)
-    rhyme_scheme: str = "AABB"              # AABB / ABAB / ABCB / free
-    target_syllables: int = 10             # target per line
+    rhyme_scheme: str | object = _AUTO_DEFAULT        # AABB / ABAB / ABCB / free
+    target_syllables: int | object = _AUTO_DEFAULT    # target per line
     used_end_phonemes: list[str] = field(default_factory=list)  # to avoid repetition
     tension_curve: TensionCurve = field(default_factory=TensionCurve)
     sections_lines: dict = field(default_factory=dict)  # track lines per section
@@ -90,15 +93,25 @@ class SongMemory:
 
     def __post_init__(self):
         """Auto-populate defaults from Style DNA when available."""
+        explicit_rhyme_scheme = self.rhyme_scheme is not _AUTO_DEFAULT
+        explicit_target_syllables = self.target_syllables is not _AUTO_DEFAULT
+
         if self.style_dna is None and _HAS_STYLE_DNA:
             self.style_dna = _STYLE_LIBRARY.get(self.genre)
-        if self.style_dna is not None:
-            dna = self.style_dna
-            # Use Style DNA defaults when caller didn't override
-            if self.target_syllables == 10 and hasattr(dna, 'avg_syllables_per_line'):
-                self.target_syllables = round(dna.avg_syllables_per_line)
-            if self.rhyme_scheme == "AABB" and hasattr(dna, 'rhyme_schemes') and dna.rhyme_schemes:
-                self.rhyme_scheme = dna.rhyme_schemes[0]
+
+        if explicit_target_syllables:
+            self.target_syllables = int(self.target_syllables)
+        elif self.style_dna is not None and hasattr(self.style_dna, "avg_syllables_per_line"):
+            self.target_syllables = round(self.style_dna.avg_syllables_per_line)
+        else:
+            self.target_syllables = 10
+
+        if explicit_rhyme_scheme:
+            self.rhyme_scheme = str(self.rhyme_scheme)
+        elif self.style_dna is not None and hasattr(self.style_dna, "rhyme_schemes") and self.style_dna.rhyme_schemes:
+            self.rhyme_scheme = self.style_dna.rhyme_schemes[0]
+        else:
+            self.rhyme_scheme = "AABB"
 
     def add_line(self, line: str, section: str = "verse1"):
         self.accepted_lines.append(line)

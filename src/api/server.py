@@ -35,6 +35,26 @@ _engine = None
 _sessions: dict[str, object] = {}   # session_id → CoWriteSession
 
 
+def _validate_genre_name(genre: str) -> str:
+    if genre not in GENRES:
+        raise HTTPException(400, f"Unknown genre '{genre}'. Valid: {GENRES}")
+    return genre
+
+
+def _resolve_style_dna(genre: str, style_blend: Optional[dict[str, float]]):
+    from src.data.style_dna import STYLES, blend_styles
+
+    if style_blend:
+        unknown = sorted(set(style_blend) - set(STYLES))
+        if unknown:
+            raise HTTPException(400, f"Unknown style(s) in blend: {unknown}")
+        total = sum(style_blend.values())
+        if total <= 0 or abs(total - 1.0) > 0.01:
+            raise HTTPException(400, "Style blend weights must sum to 1.0")
+        return blend_styles(style_blend)
+    return STYLES.get(genre)
+
+
 def get_engine():
     """Load the inference engine using the unified checkpoint loader.
 
@@ -173,7 +193,7 @@ def generate(req: GenerateRequest):
     from src.inference.engine import SongMemory
     from src.data.phoneme_annotator import annotate_line, annotation_to_dict
     from src.data.rhyme_labeler import detect_scheme
-    import numpy as np
+    genre = _validate_genre_name(req.genre)
 
     engine = get_engine()
 
@@ -183,19 +203,10 @@ def generate(req: GenerateRequest):
         from src.data.style_extractor import load_style_vector
         style_vec = load_style_vector(req.artist_style)
 
-    # Load Style DNA if available
-    style_dna = None
-    try:
-        from src.data.style_dna import STYLES, blend_styles
-        if req.style_blend:
-            style_dna = blend_styles(req.style_blend)
-        elif req.genre in STYLES:
-            style_dna = STYLES[req.genre]
-    except Exception:
-        pass
+    style_dna = _resolve_style_dna(genre, req.style_blend)
 
     memory = SongMemory(
-        genre=req.genre,
+        genre=genre,
         mood=req.mood,
         style_vec=style_vec,
         rhyme_scheme=req.rhyme_scheme,
@@ -239,7 +250,7 @@ def analyze_lyrics(req: AnalyzeRequest):
     from src.inference.engine import SongMemory
 
     engine = get_engine()
-    memory = SongMemory(genre=req.genre, mood=req.mood)
+    memory = SongMemory(genre=_validate_genre_name(req.genre), mood=req.mood)
     for line in req.lines:
         memory.add_line(line, section="verse1")
 
@@ -251,7 +262,11 @@ def cowrite_start(req: CoWriteStartRequest):
     from src.inference.engine import CoWriteSession
 
     engine = get_engine()
-    session = CoWriteSession(engine, genre=req.genre, rhyme_scheme=req.rhyme_scheme)
+    session = CoWriteSession(
+        engine,
+        genre=_validate_genre_name(req.genre),
+        rhyme_scheme=req.rhyme_scheme,
+    )
     session.memory.target_syllables = req.target_syllables
     session.memory.mood = req.mood
 
