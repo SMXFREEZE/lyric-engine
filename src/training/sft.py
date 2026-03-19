@@ -70,6 +70,18 @@ def train_sft(
     base.gradient_checkpointing_enable()
     model = LyricsModel(base, d_model=base.config.hidden_size)
 
+    quantized_kaggle_safe = use_4bit and device == "cuda"
+    if quantized_kaggle_safe:
+        # 4-bit models are already placed by transformers/bitsandbytes. Moving the
+        # whole wrapper again through `accelerate.prepare(model, ...)` can duplicate
+        # allocations and OOM small GPUs like Kaggle T4s.
+        embed_layer = base.get_input_embeddings()
+        embed_device = embed_layer.weight.device
+        embed_dtype = embed_layer.weight.dtype
+        model.style_projector = model.style_projector.to(device=embed_device, dtype=embed_dtype)
+        model.phonetic_head = model.phonetic_head.to(device=embed_device, dtype=embed_dtype)
+        print(f"  Training wrapper pinned to {embed_device} without extra model move")
+
     if accelerator.is_main_process:
         model.base.print_trainable_parameters()
 
@@ -85,9 +97,14 @@ def train_sft(
     warmup_steps = total_steps // 10
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
-    model, optimizer, train_dl, scheduler = accelerator.prepare(
-        model, optimizer, train_dl, scheduler
-    )
+    if quantized_kaggle_safe:
+        optimizer, train_dl, scheduler = accelerator.prepare(
+            optimizer, train_dl, scheduler
+        )
+    else:
+        model, optimizer, train_dl, scheduler = accelerator.prepare(
+            model, optimizer, train_dl, scheduler
+        )
 
     global_step = 0
     for epoch in range(epochs):

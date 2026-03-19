@@ -1,13 +1,8 @@
 """
 Unified checkpoint loader for inference and training.
 
-Every entry point — Kaggle notebook, API server, local CLI — should use
-these helpers instead of ad-hoc model loading.  This guarantees:
-
-  * Special tokens are always injected
-  * PEFT adapters are loaded safely (CPU first, then moved)
-  * Single-GPU and sharded device-map paths both work
-  * Style projector + phonetic head are initialised correctly
+Every entry point should use these helpers instead of ad-hoc model loading.
+This keeps token injection, PEFT loading, and device handling consistent.
 """
 
 from __future__ import annotations
@@ -17,18 +12,10 @@ from pathlib import Path
 from typing import Optional
 
 import torch
-from transformers import (
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    BitsAndBytesConfig,
-    PreTrainedModel,
-    PreTrainedTokenizer,
-)
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig, PreTrainedModel
 from peft import PeftModel
 
 from configs.genres import SPECIAL_TOKENS
-from src.model.lyrics_model import LyricsModel, StyleProjector
-from src.model.phonetic_head import PhoneticHead
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +139,28 @@ def load_base(
     return model, tokenizer
 
 
+def _load_peft_adapter(model: PreTrainedModel, checkpoint_path: str) -> PreTrainedModel:
+    """Load PEFT weights in a Kaggle-safe way.
+
+    We prefer CPU-first adapter loading so small GPUs do not spike during
+    safetensor materialization. Older PEFT versions may not support every
+    keyword, so we fall back conservatively.
+    """
+    peft_kwargs = {
+        "is_trainable": False,
+        "low_cpu_mem_usage": True,
+        "torch_device": "cpu",
+    }
+    if torch.cuda.is_available():
+        peft_kwargs["ephemeral_gpu_offload"] = True
+
+    try:
+        return PeftModel.from_pretrained(model, checkpoint_path, **peft_kwargs)
+    except TypeError:
+        peft_kwargs.pop("ephemeral_gpu_offload", None)
+        return PeftModel.from_pretrained(model, checkpoint_path, **peft_kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Inference loader
 # ---------------------------------------------------------------------------
@@ -192,12 +201,7 @@ def load_for_inference(
 
     if checkpoint_path and Path(checkpoint_path).exists():
         print(f"[checkpoint_loader] Loading PEFT adapter: {checkpoint_path}")
-        # Load on CPU first, then let accelerate place it correctly.
-        model = PeftModel.from_pretrained(
-            model,
-            checkpoint_path,
-            is_trainable=False,
-        )
+        model = _load_peft_adapter(model, checkpoint_path)
         model.eval()
         # Merge LoRA weights when possible for faster inference
         try:

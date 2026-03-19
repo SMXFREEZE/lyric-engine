@@ -18,6 +18,7 @@ import json
 import os
 from pathlib import Path
 from typing import Optional
+import re
 
 import numpy as np
 import torch
@@ -32,6 +33,13 @@ from src.model.dual_tokenizer import word_to_phoneme_ids, PHONEME_TO_ID
 
 
 SECTION_HEADER_RE = __import__("re").compile(r"^\[(verse|chorus|prechorus|bridge|hook|outro)\]", __import__("re").IGNORECASE)
+
+
+def _artist_cache_name(artist: str) -> str:
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", artist.strip())
+    safe = re.sub(r"\s+", "_", safe)
+    safe = re.sub(r"_+", "_", safe).strip("._")
+    return safe or "unknown_artist"
 
 
 def split_into_sections(lyrics: str) -> list[tuple[str, list[str]]]:
@@ -118,9 +126,19 @@ class LyricsDataset(Dataset):
     def _load_style_vec(self, artist: str) -> Optional[np.ndarray]:
         if self.style_vec_dir is None:
             return None
-        path = self.style_vec_dir / f"{artist.replace(' ', '_')}.npy"
-        if path.exists():
-            return np.load(str(path)).astype(np.float32)
+        candidate_paths = [
+            self.style_vec_dir / f"{_artist_cache_name(artist)}.npy",
+            self.style_vec_dir / f"{artist.replace(' ', '_')}.npy",
+        ]
+        for path in candidate_paths:
+            try:
+                if path.exists():
+                    return np.load(str(path)).astype(np.float32)
+            except OSError:
+                # Some raw collaboration names can exceed filesystem limits when
+                # translated directly into legacy cache filenames. Just skip the
+                # unusable legacy path and continue.
+                continue
         return None
 
     def __getitem__(self, idx: int) -> dict:
