@@ -22,7 +22,8 @@ from transformers import get_cosine_schedule_with_warmup
 from accelerate import Accelerator
 from tqdm import tqdm
 
-from src.model.lyrics_model import load_base_model, apply_lora, LyricsModel
+from src.model.checkpoint_loader import load_for_training
+from src.model.lyrics_model import apply_lora, LyricsModel
 from src.model.phonetic_head import phonetic_head_loss
 from src.training.dataset import create_dataloaders
 
@@ -32,7 +33,7 @@ def train_sft(
     genre: Optional[str] = None,
     data_path: str = "data/raw/all_songs.jsonl",
     val_path: Optional[str] = None,
-    base_model: str = "meta-llama/Llama-3.1-8B",
+    base_model: str = "mistralai/Mistral-7B-Instruct-v0.2",
     output_dir: str = "checkpoints",
     batch_size: int = 4,
     grad_accum_steps: int = 8,
@@ -64,7 +65,7 @@ def train_sft(
     Path(output_subdir).mkdir(parents=True, exist_ok=True)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    base, tokenizer = load_base_model(base_model, use_4bit=use_4bit and device == "cuda")
+    base, tokenizer = load_for_training(base_model, use_4bit=use_4bit and device == "cuda")
     base = apply_lora(base, rank=lora_rank, alpha=lora_alpha)
     base.gradient_checkpointing_enable()
     model = LyricsModel(base, d_model=base.config.hidden_size)
@@ -174,7 +175,7 @@ if __name__ == "__main__":
         genre: Optional[str] = typer.Option(None),
         data: str = typer.Option("data/raw/all_songs.jsonl"),
         val: Optional[str] = typer.Option(None),
-        base_model: str = typer.Option("meta-llama/Llama-3.1-8B"),
+        base_model: str = typer.Option("mistralai/Mistral-7B-Instruct-v0.2"),
         output_dir: str = typer.Option("checkpoints"),
         batch_size: int = typer.Option(4),
         epochs: int = typer.Option(2),
