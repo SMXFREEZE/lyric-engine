@@ -59,7 +59,7 @@ class StyleDNA:
     chart_countries: list[str] = field(default_factory=list)
 
 
-# ── Master style library — 40+ styles ────────────────────────────────────────
+# ── Master style library ─────────────────────────────────────────────────────
 
 STYLES: dict[str, StyleDNA] = {
 
@@ -390,6 +390,16 @@ STYLES: dict[str, StyleDNA] = {
         primary_languages=["en"], uses_slang=True, uses_code_switching=False,
         blends_well_with=["pop","folk","rock"],
         hook_position_sec=50, song_structure=["VERSE","CHORUS","VERSE","CHORUS","BRIDGE","CHORUS"],
+    ),
+    "rock": StyleDNA(
+        name="Rock", region="Americas/Europe",
+        bpm_range=(95, 150), typical_bpm=122,
+        energy=0.82, valence=0.52, danceability=0.58, speechiness=0.12, acousticness=0.18,
+        avg_syllables_per_line=9, rhyme_schemes=["AABB","ABAB","FREE"], flow_patterns=["anthemic","melodic"],
+        vocab_complexity=0.55, repetition_ratio=0.42,
+        primary_languages=["en"], uses_slang=True, uses_code_switching=False,
+        blends_well_with=["country","pop","alt_emo","indie"],
+        hook_position_sec=48, song_structure=["INTRO","VERSE","CHORUS","VERSE","CHORUS","BRIDGE","CHORUS"],
     ),
 }
 

@@ -41,6 +41,16 @@ def _get_embed_model() -> SentenceTransformer:
     return _embed_model
 
 
+def _artist_cache_name(artist: str) -> str:
+    """
+    Convert an arbitrary artist name into a filesystem-safe cache filename.
+    """
+    safe = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", artist.strip())
+    safe = re.sub(r"\s+", "_", safe)
+    safe = re.sub(r"_+", "_", safe).strip("._")
+    return safe or "unknown_artist"
+
+
 @dataclass
 class StyleVector:
     artist: str
@@ -182,14 +192,14 @@ def build_style_vectors(
             feature_names=[f"f{i}" for i in range(128)],
         )
         style_vectors[artist] = sv
-        np.save(out_path / f"{artist.replace(' ', '_')}.npy", vec)
+        np.save(out_path / f"{_artist_cache_name(artist)}.npy", vec)
 
     print(f"\nSaved {len(style_vectors)} style vectors → {out_path}")
     return style_vectors
 
 
 def load_style_vector(artist: str, vec_dir: str = "data/style_vectors") -> Optional[np.ndarray]:
-    path = Path(vec_dir) / f"{artist.replace(' ', '_')}.npy"
+    path = Path(vec_dir) / f"{_artist_cache_name(artist)}.npy"
     if path.exists():
         return np.load(str(path))
     return None
