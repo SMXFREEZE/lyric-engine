@@ -602,6 +602,13 @@ class LyricsEngine:
 
         candidates = []
         generation_errors: list[str] = []
+        common_generate_kwargs = {
+            "pad_token_id": self.tokenizer.eos_token_id,
+            "remove_invalid_values": True,
+            "renormalize_logits": True,
+        }
+        if eos is not None:
+            common_generate_kwargs["eos_token_id"] = eos
 
         # ── Phase 1: Divergent (MPFC mode) ────────────────────────────────
         divergent_n = max(1, int(self.beam_size * 1.5))
@@ -615,8 +622,7 @@ class LyricsEngine:
                 temperature=min(temperature * 1.3, 1.2),  # hotter = more creative
                 top_p=0.98,                                # nearly unconstrained
                 num_return_sequences=divergent_n,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=eos,
+                **common_generate_kwargs,
             )
             prompt_len = input_ids.shape[1]
             for out in out_divergent:
@@ -640,8 +646,7 @@ class LyricsEngine:
                 top_k=50,                                   # tighter vocabulary
                 top_p=0.85,
                 num_return_sequences=convergent_n,
-                pad_token_id=self.tokenizer.eos_token_id,
-                eos_token_id=eos,
+                **common_generate_kwargs,
             )
             prompt_len = input_ids.shape[1]
             for out in out_convergent:
@@ -659,12 +664,13 @@ class LyricsEngine:
                     attention_mask=attention_mask,
                     min_new_tokens=8,
                     max_new_tokens=max_new_tokens,
-                    do_sample=True,
-                    temperature=0.9,
-                    top_p=0.95,
+                    do_sample=False,
+                    num_beams=max(2, self.beam_size),
+                    num_return_sequences=max(2, min(self.beam_size, 4)),
+                    early_stopping=True,
                     repetition_penalty=1.08,
-                    num_return_sequences=1,
-                    pad_token_id=self.tokenizer.eos_token_id,
+                    no_repeat_ngram_size=3,
+                    **common_generate_kwargs,
                 )
                 prompt_len = input_ids.shape[1]
                 for out in out_fallback:
