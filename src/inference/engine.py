@@ -316,6 +316,7 @@ class LyricsEngine:
         beam_size: int = 8,
     ):
         runtime_device = device
+        model_runtime_device = self._normalize_device_value(getattr(model, "device", device))
         hf_device_map = (
             getattr(model, "hf_device_map", None)
             or getattr(getattr(model, "base_model", None), "hf_device_map", None)
@@ -323,13 +324,9 @@ class LyricsEngine:
         )
         if hf_device_map:
             self.model = model
-            try:
-                input_device = self._normalize_device_value(model.get_input_embeddings().weight.device)
-                if input_device not in {"cpu", "disk", "meta"}:
-                    runtime_device = input_device
-                else:
-                    raise ValueError
-            except Exception:
+            if model_runtime_device not in {"disk", "meta"}:
+                runtime_device = model_runtime_device
+            else:
                 mapped = None
                 for key, target in hf_device_map.items():
                     value = self._normalize_device_value(target)
@@ -351,6 +348,12 @@ class LyricsEngine:
         self.metacognitive_engine = MetacognitiveEngine()
 
     def _input_device(self) -> str:
+        try:
+            device = self._normalize_device_value(getattr(self.model, "device", self.device))
+            if device not in {"disk", "meta"}:
+                return device
+        except Exception:
+            pass
         try:
             device = self._normalize_device_value(self.model.get_input_embeddings().weight.device)
             if device not in {"cpu", "disk", "meta"}:
