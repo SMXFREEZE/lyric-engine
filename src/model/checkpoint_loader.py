@@ -203,15 +203,26 @@ def load_for_inference(
         print(f"[checkpoint_loader] Loading PEFT adapter: {checkpoint_path}")
         model = _load_peft_adapter(model, checkpoint_path)
         model.eval()
-        # Merge LoRA weights when possible for faster inference
-        try:
-            model = model.merge_and_unload()
-            print("[checkpoint_loader] LoRA weights merged for fast inference")
-        except Exception:
-            print("[checkpoint_loader] Running with LoRA adapter (merge not available)")
+        # Keep adapters attached for 4-bit inference. Merging can materialize a
+        # full-precision model on CPU and cause NaN/Inf sampling in constrained
+        # Kaggle environments.
+        if use_4bit and torch.cuda.is_available():
+            print("[checkpoint_loader] Keeping LoRA adapter attached for 4-bit GPU inference")
+        else:
+            try:
+                model = model.merge_and_unload()
+                print("[checkpoint_loader] LoRA weights merged for fast inference")
+            except Exception:
+                print("[checkpoint_loader] Running with LoRA adapter (merge not available)")
 
     model.eval()
     device = _resolve_input_device(model)
+    if device == "cpu":
+        try:
+            model = model.float()
+            print("[checkpoint_loader] Promoted CPU inference model to float32")
+        except Exception:
+            pass
     print(f"[checkpoint_loader] Ready for inference on {device}")
     return model, tokenizer, device
 
