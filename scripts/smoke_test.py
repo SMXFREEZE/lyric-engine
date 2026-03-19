@@ -180,6 +180,7 @@ def test_lyrics_model():
     print("\n--Lyrics Model (GPT-2) --")
     import torch
     from src.model.lyrics_model import load_base_model, LyricsModel
+    from src.model.phonetic_head import phonetic_head_loss
 
     base, tok = load_base_model("gpt2")
     model = LyricsModel(base, d_model=base.config.hidden_size)
@@ -192,8 +193,13 @@ def test_lyrics_model():
             attention_mask=ids["attention_mask"],
             style_vec=torch.randn(1, 128),
         )
+        ph_loss = phonetic_head_loss(
+            out["phoneme_logits"],
+            torch.ones_like(ids["input_ids"]),
+        )
     print(f"  LM logits shape     : {out['lm_logits'].shape}")
     print(f"  Phoneme logits shape: {out['phoneme_logits'].shape}")
+    print(f"  Phoneme loss        : {ph_loss.item():.4f}")
     print("  PASS")
 
 
