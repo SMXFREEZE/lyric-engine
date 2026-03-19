@@ -54,6 +54,14 @@ from src.model.metacognitive_engine import (
 )
 from src.model.research_scoring import research_score
 
+# Style DNA — used for auto-populating SongMemory defaults and scoring
+try:
+    from src.data.style_dna import STYLES as _STYLE_LIBRARY, StyleDNA, style_to_prompt_prefix
+    _HAS_STYLE_DNA = True
+except ImportError:
+    _HAS_STYLE_DNA = False
+    StyleDNA = None  # type: ignore
+
 
 # ── Syllable counter (deterministic, no LLM) ─────────────────────────────────
 
@@ -78,6 +86,19 @@ class SongMemory:
     self_model: SelfModel = field(default_factory=SelfModel)
     workspace_history: list[dict] = field(default_factory=list)
     last_workspace: Optional[dict] = None
+    style_dna: Optional[object] = None      # StyleDNA from style_dna.py
+
+    def __post_init__(self):
+        """Auto-populate defaults from Style DNA when available."""
+        if self.style_dna is None and _HAS_STYLE_DNA:
+            self.style_dna = _STYLE_LIBRARY.get(self.genre)
+        if self.style_dna is not None:
+            dna = self.style_dna
+            # Use Style DNA defaults when caller didn't override
+            if self.target_syllables == 10 and hasattr(dna, 'avg_syllables_per_line'):
+                self.target_syllables = round(dna.avg_syllables_per_line)
+            if self.rhyme_scheme == "AABB" and hasattr(dna, 'rhyme_schemes') and dna.rhyme_schemes:
+                self.rhyme_scheme = dna.rhyme_schemes[0]
 
     def add_line(self, line: str, section: str = "verse1"):
         self.accepted_lines.append(line)
@@ -119,6 +140,12 @@ class SongMemory:
     def build_prompt(self) -> str:
         """Build the full generation prompt from memory."""
         parts: list[str] = []
+        # Style DNA prefix for richer prompting
+        if self.style_dna is not None and _HAS_STYLE_DNA:
+            try:
+                parts.append(style_to_prompt_prefix(self.style_dna))
+            except Exception:
+                pass
         parts.append(f"[GENRE_START] {self.genre} [GENRE_END]")
         if self.sections:
             arc, section = self.sections[-1]
@@ -149,6 +176,8 @@ class CandidateScore:
     temporal_arc:       float   # 0-1  8-bar position alignment (PMC3498928)
     introspection:      float   # 0-1  confessional content signal
     stress_alignment:   float   # 0-1  motor-rhythm pattern
+    vocab_novelty:      float   # 0-1  vocabulary freshness
+    style_coherence:    float   # 0-1  Style DNA alignment
     base_score:         float
     total_score:        float
     workspace_score:    float = 0.0
@@ -249,30 +278,46 @@ def score_candidate(
             "vocab_novelty": 0.5, "stress_alignment": 0.5,
         }
 
+    # 16. Style coherence — does the line match the Style DNA expectations?
+    style_coherence = 0.5  # neutral if no Style DNA
+    if memory.style_dna is not None and hasattr(memory.style_dna, 'energy'):
+        dna = memory.style_dna
+        # Speechiness → expect more content words if high speechiness
+        word_count = len(line.split())
+        expected_words = dna.avg_syllables_per_line * (0.9 if dna.speechiness > 0.5 else 1.1)
+        word_fit = max(0.0, 1.0 - abs(word_count - expected_words) / max(expected_words, 1) * 0.6)
+        # Repetition ratio — if style is repetitive, penalise novelty less
+        rep_tolerance = dna.repetition_ratio
+        adjusted_novelty = novelty_score * (1.0 - rep_tolerance * 0.3)
+        style_coherence = max(0.0, min(1.0, word_fit * 0.6 + adjusted_novelty * 0.4))
+
     # ── FINAL WEIGHTED SCORE ──────────────────────────────────────────────────
-    # Three-layer scoring:
+    # Four-layer scoring:
     #   Layer 1 (Original)  — ensures basic quality: rhyme, syllables, novelty
     #   Layer 2 (Cognitive) — emotional geometry, texture, dopamine prediction
     #   Layer 3 (Research)  — polysyllabic rhyme, internal rhyme, complexity arc
+    #   Layer 4 (Style DNA) — genre-specific coherence
     total = (
-        # Layer 1: basic quality (30%)
-        0.12 * phonetic_score
-        + 0.08 * (1.0 if syllable_ok else 0.0)
+        # Layer 1: basic quality (27%)
+        0.11 * phonetic_score
+        + 0.07 * (1.0 if syllable_ok else 0.0)
         + 0.05 * novelty_score
-        + 0.05 * valence_fit
-        # Layer 2: cognitive music engine (35%)
-        + 0.12 * traj_fit
-        + 0.08 * tex_align
+        + 0.04 * valence_fit
+        # Layer 2: cognitive music engine (33%)
+        + 0.11 * traj_fit
+        + 0.07 * tex_align
         + 0.10 * gbump
         + 0.05 * hook
-        # Layer 3: research-backed (35%)
+        # Layer 3: research-backed (33%)
         + 0.10 * rs["polysyllabic_rhyme"]
-        + 0.07 * rs["internal_rhyme"]
+        + 0.06 * rs["internal_rhyme"]
         + 0.05 * rs["complexity"]
-        + 0.05 * rs["temporal_arc"]
+        + 0.04 * rs["temporal_arc"]
         + 0.04 * rs["introspection"]
         + 0.03 * rs["vocab_novelty"]
         + 0.01 * rs["stress_alignment"]
+        # Layer 4: Style DNA (7%)
+        + 0.07 * style_coherence
     )
 
     return CandidateScore(
@@ -291,6 +336,8 @@ def score_candidate(
         temporal_arc=rs["temporal_arc"],
         introspection=rs["introspection"],
         stress_alignment=rs["stress_alignment"],
+        vocab_novelty=rs["vocab_novelty"],
+        style_coherence=style_coherence,
         base_score=float(total),
         total_score=float(total),
     )

@@ -229,6 +229,105 @@ def test_inference_engine():
     print("  PASS")
 
 
+def test_checkpoint_loader():
+    print("\n-- Checkpoint Loader (GPT-2, no PEFT) --")
+    from src.model.checkpoint_loader import load_for_inference, _normalize_device
+    model, tokenizer, device = load_for_inference(base_model="gpt2", use_4bit=False)
+    assert tokenizer.pad_token is not None
+    # Verify special tokens were injected
+    vocab = tokenizer.get_vocab()
+    assert "[VERSE]" in vocab, "Special token [VERSE] not injected"
+    assert "[GENRE_START]" in vocab, "Special token [GENRE_START] not injected"
+    # Verify device normalisation
+    assert _normalize_device(0) == "cuda:0"
+    assert _normalize_device("1") == "cuda:1"
+    assert _normalize_device("cpu") == "cpu"
+    print(f"  Device resolved: {device}")
+    print("  PASS")
+
+
+def test_checkpoint_loader_inference():
+    print("\n-- Checkpoint Loader Inference (GPT-2) --")
+    from src.model.checkpoint_loader import load_for_inference
+    from src.inference.engine import LyricsEngine, SongMemory
+    model, tokenizer, device = load_for_inference(base_model="gpt2", use_4bit=False)
+    engine = LyricsEngine(model, tokenizer, device=device, beam_size=2)
+    memory = SongMemory(genre="trap", rhyme_scheme="AABB", target_syllables=10)
+    memory.sections.append(("[SETUP]", "VERSE"))
+    candidates = engine.generate_line(memory, top_n=1)
+    assert len(candidates) > 0
+    assert candidates[0].text
+    print(f"  Generated: {candidates[0].text[:60]}")
+    print("  PASS")
+
+
+def test_style_dna_basics():
+    print("\n-- Style DNA Basics --")
+    from src.data.style_dna import STYLES, blend_styles, style_to_prompt_prefix
+    assert "trap" in STYLES
+    assert "afrobeats" in STYLES
+    assert "kpop" in STYLES
+    trap = STYLES["trap"]
+    assert trap.typical_bpm > 0
+    assert 0 <= trap.energy <= 1
+    assert len(trap.rhyme_schemes) > 0
+    # Blending
+    blended = blend_styles({"trap": 0.6, "rnb": 0.4})
+    assert blended.typical_bpm > 0
+    assert 0 <= blended.energy <= 1
+    prefix = style_to_prompt_prefix(blended)
+    assert "[STYLE:" in prefix
+    print(f"  Trap BPM: {trap.typical_bpm}")
+    print(f"  Blend BPM: {blended.typical_bpm}")
+    print(f"  Prefix: {prefix[:60]}")
+    print("  PASS")
+
+
+def test_style_dna_song_memory():
+    print("\n-- Style DNA → SongMemory Integration --")
+    from src.data.style_dna import STYLES
+    from src.inference.engine import SongMemory
+    # Verify that SongMemory can accept style_dna field
+    trap_dna = STYLES["trap"]
+    memory = SongMemory(genre="trap", style_dna=trap_dna)
+    assert memory.style_dna is not None
+    assert memory.style_dna.typical_bpm == 140
+    print(f"  SongMemory with style_dna: genre={memory.genre}, bpm={memory.style_dna.typical_bpm}")
+    print("  PASS")
+
+
+def test_genre_style_sync():
+    print("\n-- Genre/Style Config Sync --")
+    from configs.genres import GENRES, GENRE_DESCRIPTIONS
+    from src.data.style_dna import STYLES
+    # Every genre in GENRES should have a description
+    missing_desc = [g for g in GENRES if g not in GENRE_DESCRIPTIONS]
+    assert not missing_desc, f"Missing descriptions: {missing_desc}"
+    # Check that we have reasonable coverage
+    assert len(GENRES) >= 10, f"Only {len(GENRES)} genres configured"
+    assert len(STYLES) >= 20, f"Only {len(STYLES)} styles in style_dna"
+    print(f"  GENRES: {len(GENRES)} configured")
+    print(f"  STYLES: {len(STYLES)} defined in style_dna")
+    print("  PASS")
+
+
+def test_api_schema():
+    print("\n-- API Schema Validation --")
+    from src.api.server import GenerateRequest, CoWriteStartRequest, SuggestRequest
+    # Verify request models can be instantiated with defaults
+    gen = GenerateRequest()
+    assert gen.genre == "hip_hop"
+    assert gen.num_lines == 8
+    co = CoWriteStartRequest()
+    assert co.genre == "hip_hop"
+    sug = SuggestRequest(session_id="test-123")
+    assert sug.n == 3
+    print("  GenerateRequest defaults OK")
+    print("  CoWriteStartRequest defaults OK")
+    print("  SuggestRequest defaults OK")
+    print("  PASS")
+
+
 if __name__ == "__main__":
     import traceback
     tests = [
@@ -241,6 +340,13 @@ if __name__ == "__main__":
         test_metacognitive_engine,
         test_lyrics_model,
         test_inference_engine,
+        # New regression tests
+        test_checkpoint_loader,
+        test_checkpoint_loader_inference,
+        test_style_dna_basics,
+        test_style_dna_song_memory,
+        test_genre_style_sync,
+        test_api_schema,
     ]
     passed = 0
     failed = 0

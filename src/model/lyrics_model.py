@@ -2,7 +2,7 @@
 Core lyrics model.
 
 Architecture:
-  - Base: Llama 3.1 8B (or GPT-2 for local dev) loaded in 4-bit via bitsandbytes
+  - Base: Mistral 7B Instruct v0.2 (or GPT-2 for local dev) loaded in 4-bit via bitsandbytes
   - LoRA adapters injected via PEFT
   - Style vector prefix injected via a learned projection into the embedding space
   - PhoneticHead attached to the last hidden state
@@ -29,7 +29,7 @@ from src.model.dual_tokenizer import PHONEME_VOCAB_SIZE
 
 
 DEV_MODEL = "gpt2"          # used when LYRICS_MODEL_PATH not set (no GPU needed)
-PROD_MODEL = "meta-llama/Llama-3.1-8B"
+PROD_MODEL = "mistralai/Mistral-7B-Instruct-v0.2"
 
 
 def get_model_name() -> str:
