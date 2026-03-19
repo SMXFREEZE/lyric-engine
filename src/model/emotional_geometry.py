@@ -135,7 +135,6 @@ WORD_EMOTION: dict[str, tuple[float, float, float]] = {
     "remember": ( 0.1,  0.3,  0.2),
     "forgot":   (-0.2,  0.2,  0.2),
     "fade":     (-0.2,  0.1,  0.1),
-    "fade":     (-0.2,  0.1,  0.1),
 }
 
 # ── Phonosemantic brightness rules ────────────────────────────────────────────
@@ -204,12 +203,25 @@ def word_emotion(word: str) -> EmotionPoint:
             weight_vals     = [PHONEME_WEIGHT.get(p.rstrip("012"), 0.0) for p in phonemes]
             brightness = float(np.mean(brightness_vals)) if brightness_vals else 0.0
             weight     = float(np.mean(weight_vals)) if weight_vals else 0.0
+            # Velocity: proxy for syllable rate — longer words with more syllables
+            # are phonetically slower; short monosyllabic words feel faster.
+            # Use inverse syllable count normalised to [−1, +1].
+            n_syl = max(1, sum(1 for p in phonemes if p[-1].isdigit()))
+            velocity = float(np.clip(1.0 - (n_syl - 1) * 0.35, -1.0, 1.0))
         else:
             brightness = 0.0
             weight = 0.0
+            velocity = 0.0
     except Exception:
         brightness = 0.0
         weight = 0.0
+        velocity = 0.0
+
+    # Intimacy: high when the word is vulnerable/quiet (low dominance, low arousal).
+    # Positive valence does NOT reduce intimacy — a whispered "I love you" is
+    # maximally intimate.  The old formula (-abs(v)*0.3 + d*-0.4) made love songs
+    # score as distant, which is wrong.
+    intimacy = float(np.clip(0.5 - abs(d) * 0.5 - a * 0.3, -1.0, 1.0))
 
     return EmotionPoint(
         valence=np.clip(v, -1, 1),
@@ -218,8 +230,8 @@ def word_emotion(word: str) -> EmotionPoint:
         tension=float(np.clip(abs(v) * 0.5 + abs(a) * 0.5, 0, 1)),
         brightness=float(np.clip(brightness, -1, 1)),
         weight=float(np.clip(weight, -1, 1)),
-        velocity=float(np.clip(a * 0.7, -1, 1)),   # arousal correlates with velocity
-        intimacy=float(np.clip(-abs(v) * 0.3 + d * -0.4, -1, 1)),  # vulnerable = intimate
+        velocity=float(np.clip(velocity, -1, 1)),
+        intimacy=float(np.clip(intimacy, -1, 1)),
     )
 
 
