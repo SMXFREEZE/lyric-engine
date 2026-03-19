@@ -306,10 +306,23 @@ class LyricsEngine:
         device: str = "cpu",
         beam_size: int = 8,
     ):
-        self.model = model.to(device)
+        runtime_device = device
+        hf_device_map = getattr(model, "hf_device_map", None)
+        if hf_device_map:
+            mapped = None
+            for target in hf_device_map.values():
+                value = str(target)
+                if value not in {"cpu", "disk", "meta"}:
+                    mapped = value
+                    break
+            if mapped is not None:
+                runtime_device = mapped
+            self.model = model
+        else:
+            self.model = model.to(device)
         self.model.eval()
         self.tokenizer = tokenizer
-        self.device = device
+        self.device = runtime_device
         self.beam_size = beam_size
         self.metacognitive_engine = MetacognitiveEngine()
 
