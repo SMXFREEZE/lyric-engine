@@ -299,6 +299,15 @@ def score_candidate(
 # ── Generation engine ─────────────────────────────────────────────────────────
 
 class LyricsEngine:
+    @staticmethod
+    def _normalize_device_value(value: object) -> str:
+        if isinstance(value, int):
+            return f"cuda:{value}"
+        text = str(value).strip()
+        if text.isdigit():
+            return f"cuda:{text}"
+        return text
+
     def __init__(
         self,
         model: PreTrainedModel,
@@ -315,7 +324,7 @@ class LyricsEngine:
         if hf_device_map:
             self.model = model
             try:
-                input_device = str(model.get_input_embeddings().weight.device)
+                input_device = self._normalize_device_value(model.get_input_embeddings().weight.device)
                 if input_device not in {"cpu", "disk", "meta"}:
                     runtime_device = input_device
                 else:
@@ -323,7 +332,7 @@ class LyricsEngine:
             except Exception:
                 mapped = None
                 for key, target in hf_device_map.items():
-                    value = str(target)
+                    value = self._normalize_device_value(target)
                     if value in {"cpu", "disk", "meta"}:
                         continue
                     if any(token in key for token in ("embed", "wte", "input")):
@@ -343,12 +352,12 @@ class LyricsEngine:
 
     def _input_device(self) -> str:
         try:
-            device = str(self.model.get_input_embeddings().weight.device)
+            device = self._normalize_device_value(self.model.get_input_embeddings().weight.device)
             if device not in {"cpu", "disk", "meta"}:
                 return device
         except Exception:
             pass
-        return self.device
+        return self._normalize_device_value(self.device)
 
     def _normalize_section_name(self, section: str) -> str:
         normalized = section.lower().strip("[] ")
