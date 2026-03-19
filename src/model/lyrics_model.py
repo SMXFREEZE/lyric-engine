@@ -40,6 +40,7 @@ def load_base_model(
     model_name: Optional[str] = None,
     use_4bit: bool = False,
     device: str = "cpu",
+    device_map_override=None,
 ) -> tuple[PreTrainedModel, AutoTokenizer]:
     name = model_name or get_model_name()
     print(f"[lyrics_model] Loading base model: {name}")
@@ -56,7 +57,7 @@ def load_base_model(
     model = AutoModelForCausalLM.from_pretrained(
         name,
         quantization_config=bnb_config,
-        device_map="auto" if torch.cuda.is_available() else None,
+        device_map=device_map_override if device_map_override is not None else ("auto" if torch.cuda.is_available() else None),
         low_cpu_mem_usage=True,
         torch_dtype=torch.float32 if device == "cpu" else torch.float16,
     )
