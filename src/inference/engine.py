@@ -307,17 +307,32 @@ class LyricsEngine:
         beam_size: int = 8,
     ):
         runtime_device = device
-        hf_device_map = getattr(model, "hf_device_map", None)
+        hf_device_map = (
+            getattr(model, "hf_device_map", None)
+            or getattr(getattr(model, "base_model", None), "hf_device_map", None)
+            or getattr(getattr(getattr(model, "base_model", None), "model", None), "hf_device_map", None)
+        )
         if hf_device_map:
-            mapped = None
-            for target in hf_device_map.values():
-                value = str(target)
-                if value not in {"cpu", "disk", "meta"}:
-                    mapped = value
-                    break
-            if mapped is not None:
-                runtime_device = mapped
             self.model = model
+            try:
+                input_device = str(model.get_input_embeddings().weight.device)
+                if input_device not in {"cpu", "disk", "meta"}:
+                    runtime_device = input_device
+                else:
+                    raise ValueError
+            except Exception:
+                mapped = None
+                for key, target in hf_device_map.items():
+                    value = str(target)
+                    if value in {"cpu", "disk", "meta"}:
+                        continue
+                    if any(token in key for token in ("embed", "wte", "input")):
+                        mapped = value
+                        break
+                    if mapped is None:
+                        mapped = value
+                if mapped is not None:
+                    runtime_device = mapped
         else:
             self.model = model.to(device)
         self.model.eval()
@@ -325,6 +340,15 @@ class LyricsEngine:
         self.device = runtime_device
         self.beam_size = beam_size
         self.metacognitive_engine = MetacognitiveEngine()
+
+    def _input_device(self) -> str:
+        try:
+            device = str(self.model.get_input_embeddings().weight.device)
+            if device not in {"cpu", "disk", "meta"}:
+                return device
+        except Exception:
+            pass
+        return self.device
 
     def _normalize_section_name(self, section: str) -> str:
         normalized = section.lower().strip("[] ")
@@ -498,8 +522,9 @@ class LyricsEngine:
             truncation=True,
             max_length=768,
         )
-        input_ids = enc["input_ids"].to(self.device)
-        attention_mask = enc["attention_mask"].to(self.device)
+        input_device = self._input_device()
+        input_ids = enc["input_ids"].to(input_device)
+        attention_mask = enc["attention_mask"].to(input_device)
         newline_ids = self.tokenizer.encode("\n", add_special_tokens=False)
         eos = newline_ids[0] if len(newline_ids) == 1 else None
 
