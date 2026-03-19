@@ -449,6 +449,14 @@ class LyricsEngine:
                 merged[item.text] = item
         return list(merged.values())
 
+    @staticmethod
+    def _first_nonempty_line(text: str) -> str:
+        for raw in text.splitlines():
+            line = raw.strip()
+            if line:
+                return line
+        return text.strip()
+
     @torch.no_grad()
     def generate_candidates(
         self,
@@ -479,9 +487,11 @@ class LyricsEngine:
         )
         input_ids = enc["input_ids"].to(self.device)
         attention_mask = enc["attention_mask"].to(self.device)
-        eos = self.tokenizer.encode("\n")[0] if "\n" in self.tokenizer.get_vocab() else None
+        newline_ids = self.tokenizer.encode("\n", add_special_tokens=False)
+        eos = newline_ids[0] if len(newline_ids) == 1 else None
 
         candidates = []
+        generation_errors: list[str] = []
 
         # ── Phase 1: Divergent (MPFC mode) ────────────────────────────────
         divergent_n = max(1, int(self.beam_size * 1.5))
@@ -489,6 +499,7 @@ class LyricsEngine:
             out_divergent = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                min_new_tokens=6,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
                 temperature=min(temperature * 1.3, 1.2),  # hotter = more creative
@@ -500,11 +511,11 @@ class LyricsEngine:
             prompt_len = input_ids.shape[1]
             for out in out_divergent:
                 text = self.tokenizer.decode(out[prompt_len:], skip_special_tokens=True)
-                line = text.strip().split("\n")[0].strip()
+                line = self._first_nonempty_line(text)
                 if line:
                     candidates.append(line)
-        except Exception:
-            pass
+        except Exception as exc:
+            generation_errors.append(f"divergent:{exc}")
 
         # ── Phase 2: Convergent (DLPFC mode) ──────────────────────────────
         convergent_n = max(1, self.beam_size // 2)
@@ -512,6 +523,7 @@ class LyricsEngine:
             out_convergent = self.model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                min_new_tokens=6,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
                 temperature=max(temperature * 0.7, 0.5),  # cooler = more structured
@@ -524,11 +536,34 @@ class LyricsEngine:
             prompt_len = input_ids.shape[1]
             for out in out_convergent:
                 text = self.tokenizer.decode(out[prompt_len:], skip_special_tokens=True)
-                line = text.strip().split("\n")[0].strip()
+                line = self._first_nonempty_line(text)
                 if line:
                     candidates.append(line)
-        except Exception:
-            pass
+        except Exception as exc:
+            generation_errors.append(f"convergent:{exc}")
+
+        if not candidates:
+            try:
+                out_fallback = self.model.generate(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    min_new_tokens=8,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.9,
+                    top_p=0.95,
+                    repetition_penalty=1.08,
+                    num_return_sequences=1,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                )
+                prompt_len = input_ids.shape[1]
+                for out in out_fallback:
+                    text = self.tokenizer.decode(out[prompt_len:], skip_special_tokens=True)
+                    line = self._first_nonempty_line(text)
+                    if line:
+                        candidates.append(line)
+            except Exception as exc:
+                generation_errors.append(f"fallback:{exc}")
 
         # Deduplicate preserving order
         seen = set()
@@ -538,7 +573,11 @@ class LyricsEngine:
                 seen.add(c)
                 unique.append(c)
 
-        return unique if unique else ["[no candidate generated]"]
+        if unique:
+            return unique
+        if generation_errors:
+            return [f"[generation failed: {generation_errors[0]}]"]
+        return ["[no candidate generated]"]
 
     def generate_line(
         self,
