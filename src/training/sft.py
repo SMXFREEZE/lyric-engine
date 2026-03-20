@@ -80,6 +80,23 @@ def train_sft(
     curriculum_order : bool
         Sort examples by complexity (short/simple first)
     """
+    from pathlib import Path as P
+
+    def save_checkpoint(mdl, tok, path):
+        """Save PEFT adapter + tokenizer to path."""
+        P(path).mkdir(parents=True, exist_ok=True)
+        # Get the underlying model (handle accelerator wrapping if any)
+        unwrapped = accelerator.unwrap_model(mdl) if hasattr(accelerator, 'unwrap_model') else mdl
+        # If it's a LyricsModel wrapper, get the base PEFT model
+        if hasattr(unwrapped, 'base'):
+            peft_model = unwrapped.base
+        else:
+            peft_model = unwrapped
+        # Save PEFT adapter
+        peft_model.save_pretrained(path)
+        tok.save_pretrained(path)
+        print(f"  [sft] Checkpoint saved → {path}")
+
     # Import the appropriate dataset module
     if training_mode == "ccl":
         from src.training.cortical_dataset import create_ccl_dataloaders
@@ -255,9 +272,7 @@ def train_sft(
                 # Step-based checkpoint saving
                 if save_steps > 0 and global_step % save_steps == 0 and accelerator.is_main_process:
                     step_ckpt_path = f"{output_subdir}/step_{global_step}"
-                    accelerator.unwrap_model(model).save(step_ckpt_path)
-                    tokenizer.save_pretrained(step_ckpt_path)
-                    print(f"\n  [sft] Step checkpoint saved → {step_ckpt_path}")
+                    save_checkpoint(model, tokenizer, step_ckpt_path)
 
             # Validation
             if val_dl:
@@ -278,10 +293,8 @@ def train_sft(
             # Save checkpoint
             if accelerator.is_main_process:
                 ckpt_path = f"{output_subdir}/epoch_{epoch+1}"
-                accelerator.unwrap_model(model).save(ckpt_path)
-                tokenizer.save_pretrained(ckpt_path)
+                save_checkpoint(model, tokenizer, ckpt_path)
                 last_saved_epoch = epoch + 1
-                print(f"  Saved checkpoint → {ckpt_path}")
 
     except KeyboardInterrupt:
         interrupted = True
@@ -291,9 +304,7 @@ def train_sft(
             partial_epoch_label = f"epoch_{last_saved_epoch + 1}_partial_step_{global_step}"
             ckpt_path = f"{output_subdir}/{partial_epoch_label}"
             try:
-                accelerator.unwrap_model(model).save(ckpt_path)
-                tokenizer.save_pretrained(ckpt_path)
-                print(f"[sft] Emergency checkpoint saved → {ckpt_path}")
+                save_checkpoint(model, tokenizer, ckpt_path)
                 print(f"[sft] Trained {global_step} steps total before interrupt")
             except Exception as save_exc:
                 print(f"[sft] WARNING: emergency save failed: {save_exc}")
