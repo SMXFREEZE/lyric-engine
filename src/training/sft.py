@@ -1,13 +1,26 @@
 """
-Stage 1 + 2: Supervised Fine-Tuning (SFT)
-  - Stage 1: General music SFT on full annotated corpus (LoRA rank 64)
-  - Stage 2: Per-genre LoRA adapters (LoRA rank 16, genre-specific subsets)
+Cortical Creative Loop (CCL) Training
 
-Run on cloud GPU (4x A100 80GB for Stage 1, 1x A100 for Stage 2):
-  python -m src.training.sft --stage 1 --data data/raw/all_songs.jsonl
-  python -m src.training.sft --stage 2 --genre trap --data data/raw/trap.jsonl
+Training modes:
+  - mode='ccl': Brain-inspired cortical loop (PERCEIVE→INTENT→PREDICT→ERROR→SELECT)
+  - mode='simple': Basic SFT for comparison/fallback
 
-Estimated cost: ~$800 Stage 1, ~$150 Stage 2 (all genres) on RunPod.
+The CCL format teaches the model to:
+  1. PERCEIVE: Encode context (section, emotion, rhythm)
+  2. INTENT: Form generation goals
+  3. PREDICT: Generate draft output
+  4. ERROR: Detect prediction errors (emotion mismatch, rhythm weakness, etc.)
+  5. SELECT: Choose final output
+
+Stage 1 + 2:
+  - Stage 1: General music SFT on full annotated corpus
+  - Stage 2: Per-genre LoRA adapters
+
+Kaggle-optimized defaults:
+  - TRAIN_SUBSET_ROWS: 3000 (fast), 10000 (meaningful), 20000 (heavy)
+  - SAVE_STEPS: 200 (frequent checkpoints for interruption recovery)
+  - MAX_LENGTH: 320 (fits CCL format without truncation)
+  - MAX_PER_ARTIST: 3 (reduces overconcentration)
 """
 
 import os
@@ -26,7 +39,6 @@ from peft import prepare_model_for_kbit_training
 from src.model.checkpoint_loader import load_for_training
 from src.model.lyrics_model import apply_lora, LyricsModel
 from src.model.phonetic_head import phonetic_head_loss
-from src.training.dataset import create_dataloaders
 
 
 def train_sft(
@@ -36,18 +48,50 @@ def train_sft(
     val_path: Optional[str] = None,
     base_model: str = "mistralai/Mistral-7B-Instruct-v0.2",
     output_dir: str = "checkpoints",
-    batch_size: int = 4,
+    batch_size: int = 2,              # Kaggle-safe default
     grad_accum_steps: int = 8,
-    max_length: int = 512,
-    epochs: int = 2,
-    lr: float = 1e-4,          # was 2e-4; 1e-4 is safer for Mistral 4-bit LoRA
-    lora_rank: int = 32,       # was 64; 32 gives better signal/noise on small Kaggle runs
+    max_length: int = 320,            # Fits CCL format
+    epochs: int = 1,
+    lr: float = 1e-4,
+    lora_rank: int = 32,
     alpha: Optional[int] = None,
     use_4bit: bool = True,
-    style_vec_dir: Optional[str] = "data/style_vectors",
+    style_vec_dir: Optional[str] = None,  # Off by default
     phonetic_loss_weight: float = 0.1,
-    viral_conditioning: Optional["np.ndarray"] = None,  # 32-dim viral DNA vector
+    viral_conditioning: Optional["np.ndarray"] = None,
+    # New CCL options
+    training_mode: str = "ccl",       # 'ccl' or 'simple'
+    save_steps: int = 200,            # Save every N steps
+    max_per_artist: int = 3,          # Cap songs per artist
+    curriculum_order: bool = True,    # Short/simple examples first
 ):
+    """
+    Cortical Creative Loop training.
+
+    Parameters
+    ----------
+    training_mode : str
+        'ccl' for brain-inspired cortical loop format
+        'simple' for basic SFT format
+    save_steps : int
+        Save checkpoint every N steps (for interrupt recovery)
+    max_per_artist : int
+        Cap songs per artist to reduce overconcentration
+    curriculum_order : bool
+        Sort examples by complexity (short/simple first)
+    """
+    # Import the appropriate dataset module
+    if training_mode == "ccl":
+        from src.training.cortical_dataset import create_ccl_dataloaders
+        create_dataloaders_fn = lambda *args, **kwargs: create_ccl_dataloaders(
+            *args, mode="ccl", max_per_artist=max_per_artist, **kwargs
+        )
+        print(f"[sft] Training mode: CORTICAL CREATIVE LOOP (CCL)")
+    else:
+        from src.training.dataset import create_dataloaders
+        create_dataloaders_fn = create_dataloaders
+        print(f"[sft] Training mode: simple SFT")
+
     accelerator = Accelerator(gradient_accumulation_steps=grad_accum_steps)
 
     lora_alpha = alpha if alpha is not None else lora_rank * 2
@@ -122,11 +166,10 @@ def train_sft(
     if accelerator.is_main_process:
         model.base.print_trainable_parameters()
 
-    train_dl, val_dl = create_dataloaders(
+    train_dl, val_dl = create_dataloaders_fn(
         data_path, val_path, tokenizer,
         batch_size=batch_size,
         max_length=max_length,
-        style_vec_dir=style_vec_dir,
     )
 
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=0.01)
@@ -209,6 +252,13 @@ def train_sft(
                 if accelerator.is_main_process:
                     pbar.set_postfix({"loss": f"{loss.item():.4f}", "step": global_step})
 
+                # Step-based checkpoint saving
+                if save_steps > 0 and global_step % save_steps == 0 and accelerator.is_main_process:
+                    step_ckpt_path = f"{output_subdir}/step_{global_step}"
+                    accelerator.unwrap_model(model).save(step_ckpt_path)
+                    tokenizer.save_pretrained(step_ckpt_path)
+                    print(f"\n  [sft] Step checkpoint saved → {step_ckpt_path}")
+
             # Validation
             if val_dl:
                 model.eval()
@@ -272,17 +322,22 @@ if __name__ == "__main__":
         val: Optional[str] = typer.Option(None),
         base_model: str = typer.Option("mistralai/Mistral-7B-Instruct-v0.2"),
         output_dir: str = typer.Option("checkpoints"),
-        batch_size: int = typer.Option(4),
-        epochs: int = typer.Option(2),
-        lr: float = typer.Option(2e-4),
-        lora_rank: int = typer.Option(64),
+        batch_size: int = typer.Option(2),
+        epochs: int = typer.Option(1),
+        lr: float = typer.Option(1e-4),
+        lora_rank: int = typer.Option(32),
         no_4bit: bool = typer.Option(False),
+        training_mode: str = typer.Option("ccl", help="'ccl' or 'simple'"),
+        save_steps: int = typer.Option(200, help="Save checkpoint every N steps"),
+        max_per_artist: int = typer.Option(3, help="Cap songs per artist"),
     ):
         train_sft(
             stage=stage, genre=genre, data_path=data, val_path=val,
             base_model=base_model, output_dir=output_dir,
             batch_size=batch_size, epochs=epochs, lr=lr,
             lora_rank=lora_rank, use_4bit=not no_4bit,
+            training_mode=training_mode, save_steps=save_steps,
+            max_per_artist=max_per_artist,
         )
 
     app()
