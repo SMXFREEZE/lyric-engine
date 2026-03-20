@@ -5,6 +5,7 @@ Tests the full pipeline with GPT-2 as the base model.
 Run: python scripts/smoke_test.py
 """
 
+import os
 import sys
 sys.path.insert(0, ".")
 
@@ -231,7 +232,11 @@ def test_inference_engine():
 
 def test_checkpoint_loader():
     print("\n-- Checkpoint Loader (GPT-2, no PEFT) --")
-    from src.model.checkpoint_loader import load_for_inference, _normalize_device
+    from src.model.checkpoint_loader import (
+        load_for_inference,
+        _normalize_device,
+        _resolve_loader_kwargs,
+    )
     model, tokenizer, device = load_for_inference(base_model="gpt2", use_4bit=False)
     assert tokenizer.pad_token is not None
     # Verify special tokens were injected
@@ -242,7 +247,40 @@ def test_checkpoint_loader():
     assert _normalize_device(0) == "cuda:0"
     assert _normalize_device("1") == "cuda:1"
     assert _normalize_device("cpu") == "cpu"
+    kwargs = _resolve_loader_kwargs(use_4bit=False, device_map_override="cpu")
+    assert kwargs["device_map"] == "cpu"
     print(f"  Device resolved: {device}")
+    print("  PASS")
+
+
+def test_checkpoint_loader_env_controls():
+    print("\n-- Checkpoint Loader Env Controls --")
+    from unittest.mock import patch
+    from src.model.checkpoint_loader import _resolve_loader_kwargs
+
+    with patch("torch.cuda.is_available", return_value=True), \
+         patch("torch.cuda.device_count", return_value=2), \
+         patch.dict(
+             os.environ,
+             {
+                 "LYRICS_DEVICE_MAP": "balanced_low_0",
+                 "LYRICS_MAX_MEMORY_GB": "11,12",
+                 "LYRICS_CPU_MAX_MEMORY_GB": "64",
+                 "LYRICS_ENABLE_CPU_OFFLOAD": "1",
+                 "LYRICS_OFFLOAD_DIR": "tmp/offload",
+             },
+             clear=False,
+         ):
+        kwargs = _resolve_loader_kwargs(use_4bit=True, device_map_override=None)
+
+    assert kwargs["device_map"] == "balanced_low_0"
+    assert kwargs["max_memory"][0] == "11GiB"
+    assert kwargs["max_memory"][1] == "12GiB"
+    assert kwargs["max_memory"]["cpu"] == "64GiB"
+    assert kwargs["offload_folder"] == "tmp/offload"
+    assert kwargs["offload_state_dict"] is True
+    print(f"  device_map: {kwargs['device_map']}")
+    print(f"  max_memory: {kwargs['max_memory']}")
     print("  PASS")
 
 
@@ -258,6 +296,23 @@ def test_checkpoint_loader_inference():
     assert len(candidates) > 0
     assert candidates[0].text
     print(f"  Generated: {candidates[0].text[:60]}")
+    print("  PASS")
+
+
+def test_call_echo_stopword_filter():
+    print("\n-- Call+Echo Stopword Filter --")
+    from src.model.dopamine_arc import detect_hook_patterns
+
+    false_positive = detect_hook_patterns("I was found", "I was lost")
+    true_positive = detect_hook_patterns(
+        "Now I'm gold in the skyline",
+        "I was gold in the basement",
+    )
+
+    assert "call_echo" not in false_positive
+    assert "call_echo" in true_positive
+    print(f"  False positive patterns: {false_positive}")
+    print(f"  True positive patterns : {true_positive}")
     print("  PASS")
 
 
@@ -378,7 +433,9 @@ if __name__ == "__main__":
         test_inference_engine,
         # New regression tests
         test_checkpoint_loader,
+        test_checkpoint_loader_env_controls,
         test_checkpoint_loader_inference,
+        test_call_echo_stopword_filter,
         test_style_dna_basics,
         test_style_dna_song_memory,
         test_genre_style_sync,
