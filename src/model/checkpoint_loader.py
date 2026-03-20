@@ -79,6 +79,82 @@ def _resolve_input_device(model: PreTrainedModel, fallback: str = "cpu") -> str:
     return _normalize_device(fallback)
 
 
+def _env_flag(name: str) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    return value in {"1", "true", "yes", "on"}
+
+
+def _parse_max_memory_override(raw: str, device_count: int) -> dict[int | str, str]:
+    parts = [part.strip() for part in raw.split(",") if part.strip()]
+    if not parts:
+        return {}
+
+    budgets: dict[int | str, str] = {}
+    if len(parts) == 1:
+        budget = f"{parts[0]}GiB"
+        for idx in range(device_count):
+            budgets[idx] = budget
+    else:
+        for idx, part in enumerate(parts[:device_count]):
+            budgets[idx] = f"{part}GiB"
+    return budgets
+
+
+def _resolve_loader_kwargs(
+    *,
+    use_4bit: bool,
+    device_map_override: Optional[str | dict],
+) -> dict:
+    """Resolve device placement/offload kwargs for ``from_pretrained``.
+
+    Environment overrides:
+    - ``LYRICS_DEVICE_MAP``: explicit device-map string/dict-like string
+    - ``LYRICS_MAX_MEMORY_GB``: per-GPU GiB budget (single value or comma list)
+    - ``LYRICS_CPU_MAX_MEMORY_GB``: CPU max memory budget (default: 48)
+    - ``LYRICS_ENABLE_CPU_OFFLOAD``: enable ``offload_folder`` + ``offload_state_dict``
+    - ``LYRICS_OFFLOAD_DIR``: override offload folder path
+    """
+    if device_map_override is not None:
+        return {"device_map": device_map_override, "max_memory": None}
+
+    if not torch.cuda.is_available():
+        return {"device_map": None, "max_memory": None}
+
+    env_device_map = os.getenv("LYRICS_DEVICE_MAP")
+    if env_device_map:
+        dm: str | dict = env_device_map
+    elif use_4bit and torch.cuda.device_count() > 1:
+        dm = "balanced_low_0"
+    else:
+        dm = "auto"
+
+    max_memory = None
+    if use_4bit and torch.cuda.device_count() > 1:
+        max_memory = {}
+        override = os.getenv("LYRICS_MAX_MEMORY_GB", "").strip()
+        if override:
+            max_memory.update(_parse_max_memory_override(override, torch.cuda.device_count()))
+        else:
+            for i in range(torch.cuda.device_count()):
+                total_gib = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+                headroom_gib = 3 if i == 0 else 2
+                budget_gib = max(10, int(total_gib - headroom_gib))
+                max_memory[i] = f"{budget_gib}GiB"
+
+        cpu_budget = os.getenv("LYRICS_CPU_MAX_MEMORY_GB", "48").strip() or "48"
+        max_memory["cpu"] = f"{cpu_budget}GiB"
+
+    loader_kwargs = {"device_map": dm, "max_memory": max_memory}
+    if _env_flag("LYRICS_ENABLE_CPU_OFFLOAD"):
+        loader_kwargs["offload_folder"] = os.getenv(
+            "LYRICS_OFFLOAD_DIR",
+            str(Path.cwd() / ".offload"),
+        )
+        loader_kwargs["offload_state_dict"] = True
+
+    return loader_kwargs
+
+
 # ---------------------------------------------------------------------------
 # Core loaders
 # ---------------------------------------------------------------------------
@@ -117,26 +193,18 @@ def load_base(
             bnb_4bit_use_double_quant=True,
         )
 
-    max_memory = None
-    if device_map_override is not None:
-        dm = device_map_override
-    elif torch.cuda.is_available():
-        # On Kaggle T4 x2, a plain "auto" placement often over-fills GPU 0 during
-        # Mistral materialization. Keep explicit headroom on every GPU and bias the
-        # loader away from GPU 0 so training prep still has room to run.
-        if use_4bit and torch.cuda.device_count() > 1:
-            dm = "balanced_low_0"
-            max_memory = {}
-            for i in range(torch.cuda.device_count()):
-                total_gib = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
-                headroom_gib = 3 if i == 0 else 2
-                budget_gib = max(10, int(total_gib - headroom_gib))
-                max_memory[i] = f"{budget_gib}GiB"
-            max_memory["cpu"] = "48GiB"
-        else:
-            dm = "auto"
-    else:
-        dm = None
+    loader_kwargs = _resolve_loader_kwargs(
+        use_4bit=use_4bit,
+        device_map_override=device_map_override,
+    )
+    dm = loader_kwargs["device_map"]
+    max_memory = loader_kwargs["max_memory"]
+    print(
+        "[checkpoint_loader] Placement:",
+        f"device_map={dm}",
+        f"max_memory={max_memory}",
+        f"cpu_offload={'on' if loader_kwargs.get('offload_folder') else 'off'}",
+    )
 
     model = AutoModelForCausalLM.from_pretrained(
         name,
@@ -145,6 +213,11 @@ def load_base(
         max_memory=max_memory,
         low_cpu_mem_usage=True,
         torch_dtype=torch.float32 if device == "cpu" else torch.float16,
+        **{
+            key: value
+            for key, value in loader_kwargs.items()
+            if key not in {"device_map", "max_memory"}
+        },
     )
 
     tokenizer = _load_tokenizer(name)

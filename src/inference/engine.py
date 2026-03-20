@@ -723,6 +723,11 @@ class LyricsEngine:
 
         if not candidates:
             try:
+                fallback_kwargs = {
+                    **common_generate_kwargs,
+                    "repetition_penalty": 1.08,
+                    "no_repeat_ngram_size": 3,
+                }
                 out_fallback = self.model.generate(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
@@ -732,9 +737,7 @@ class LyricsEngine:
                     num_beams=max(2, self.beam_size),
                     num_return_sequences=max(2, min(self.beam_size, 4)),
                     early_stopping=True,
-                    repetition_penalty=1.08,
-                    no_repeat_ngram_size=3,
-                    **common_generate_kwargs,
+                    **fallback_kwargs,
                 )
                 prompt_len = input_ids.shape[1]
                 for out in out_fallback:
