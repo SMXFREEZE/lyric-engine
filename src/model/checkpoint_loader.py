@@ -84,6 +84,41 @@ def _env_flag(name: str) -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
+def _get_system_ram_gib() -> float:
+    """Return total system RAM in GiB, with fallback."""
+    try:
+        import psutil
+        return psutil.virtual_memory().total / (1024 ** 3)
+    except ImportError:
+        pass
+    # Fallback: read /proc/meminfo on Linux
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    kb = int(line.split()[1])
+                    return kb / (1024 ** 2)
+    except Exception:
+        pass
+    return 32.0  # Conservative fallback
+
+
+def _is_kaggle_environment() -> bool:
+    """Detect if running inside Kaggle."""
+    return os.path.exists("/kaggle") or os.getenv("KAGGLE_KERNEL_RUN_TYPE") is not None
+
+
+def _is_t4_class_gpu(device_idx: int) -> bool:
+    """Check if GPU is T4-class (under 16 GiB VRAM)."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        total_gib = torch.cuda.get_device_properties(device_idx).total_memory / (1024 ** 3)
+        return total_gib < 16.5  # T4 is ~15 GiB
+    except Exception:
+        return False
+
+
 def _parse_max_memory_override(raw: str, device_count: int) -> dict[int | str, str]:
     parts = [part.strip() for part in raw.split(",") if part.strip()]
     if not parts:
@@ -100,6 +135,18 @@ def _parse_max_memory_override(raw: str, device_count: int) -> dict[int | str, s
     return budgets
 
 
+def _pre_load_cleanup() -> None:
+    """Clear memory before heavy model load."""
+    import gc
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+
 def _resolve_loader_kwargs(
     *,
     use_4bit: bool,
@@ -110,9 +157,14 @@ def _resolve_loader_kwargs(
     Environment overrides:
     - ``LYRICS_DEVICE_MAP``: explicit device-map string/dict-like string
     - ``LYRICS_MAX_MEMORY_GB``: per-GPU GiB budget (single value or comma list)
-    - ``LYRICS_CPU_MAX_MEMORY_GB``: CPU max memory budget (default: 48)
+    - ``LYRICS_CPU_MAX_MEMORY_GB``: CPU max memory budget (auto-detected if not set)
     - ``LYRICS_ENABLE_CPU_OFFLOAD``: enable ``offload_folder`` + ``offload_state_dict``
     - ``LYRICS_OFFLOAD_DIR``: override offload folder path
+
+    Kaggle T4 x2 gets tighter defaults automatically:
+    - GPU 0 headroom: 4.5 GiB (was 3)
+    - GPU 1+ headroom: 3 GiB (was 2)
+    - offload_state_dict enabled by default for multi-GPU 4-bit
     """
     if device_map_override is not None:
         return {"device_map": device_map_override, "max_memory": None}
@@ -128,29 +180,50 @@ def _resolve_loader_kwargs(
     else:
         dm = "auto"
 
+    n_gpus = torch.cuda.device_count()
+    is_kaggle = _is_kaggle_environment()
+    is_multi_gpu_4bit = use_4bit and n_gpus > 1
+
     max_memory = None
-    if use_4bit and torch.cuda.device_count() > 1:
+    if is_multi_gpu_4bit:
         max_memory = {}
         override = os.getenv("LYRICS_MAX_MEMORY_GB", "").strip()
         if override:
-            max_memory.update(_parse_max_memory_override(override, torch.cuda.device_count()))
+            max_memory.update(_parse_max_memory_override(override, n_gpus))
         else:
-            for i in range(torch.cuda.device_count()):
+            for i in range(n_gpus):
                 total_gib = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
-                headroom_gib = 3 if i == 0 else 2
-                budget_gib = max(10, int(total_gib - headroom_gib))
+                # Tighter headroom for T4-class GPUs (under 16 GiB)
+                if _is_t4_class_gpu(i):
+                    headroom_gib = 4.5 if i == 0 else 3.0
+                else:
+                    headroom_gib = 3.0 if i == 0 else 2.0
+                budget_gib = max(8, int(total_gib - headroom_gib))
                 max_memory[i] = f"{budget_gib}GiB"
 
-        cpu_budget = os.getenv("LYRICS_CPU_MAX_MEMORY_GB", "48").strip() or "48"
+        # Auto-detect CPU budget from system RAM
+        cpu_override = os.getenv("LYRICS_CPU_MAX_MEMORY_GB", "").strip()
+        if cpu_override:
+            cpu_budget = cpu_override
+        else:
+            system_ram = _get_system_ram_gib()
+            # Reserve ~4 GiB for system, cap at 48 GiB for safety
+            cpu_budget = str(min(48, max(8, int(system_ram - 4))))
         max_memory["cpu"] = f"{cpu_budget}GiB"
 
     loader_kwargs = {"device_map": dm, "max_memory": max_memory}
-    if _env_flag("LYRICS_ENABLE_CPU_OFFLOAD"):
-        loader_kwargs["offload_folder"] = os.getenv(
-            "LYRICS_OFFLOAD_DIR",
-            str(Path.cwd() / ".offload"),
-        )
+
+    # Enable offload_state_dict by default for multi-GPU 4-bit on Kaggle
+    # or when explicitly requested via env
+    enable_offload = _env_flag("LYRICS_ENABLE_CPU_OFFLOAD") or (is_multi_gpu_4bit and is_kaggle)
+    if enable_offload:
+        offload_dir = os.getenv("LYRICS_OFFLOAD_DIR", "").strip()
+        if not offload_dir:
+            offload_dir = str(Path.cwd() / ".offload")
+        loader_kwargs["offload_folder"] = offload_dir
         loader_kwargs["offload_state_dict"] = True
+        # Ensure offload directory exists
+        Path(offload_dir).mkdir(parents=True, exist_ok=True)
 
     return loader_kwargs
 
@@ -199,12 +272,26 @@ def load_base(
     )
     dm = loader_kwargs["device_map"]
     max_memory = loader_kwargs["max_memory"]
+
+    is_kaggle = _is_kaggle_environment()
+    n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    t4_detected = any(_is_t4_class_gpu(i) for i in range(n_gpus)) if n_gpus > 0 else False
+
     print(
         "[checkpoint_loader] Placement:",
         f"device_map={dm}",
         f"max_memory={max_memory}",
         f"cpu_offload={'on' if loader_kwargs.get('offload_folder') else 'off'}",
     )
+    print(
+        "[checkpoint_loader] Environment:",
+        f"kaggle={is_kaggle}",
+        f"n_gpus={n_gpus}",
+        f"t4_class={t4_detected}",
+    )
+
+    # Clean memory before heavy model load
+    _pre_load_cleanup()
 
     model = AutoModelForCausalLM.from_pretrained(
         name,
