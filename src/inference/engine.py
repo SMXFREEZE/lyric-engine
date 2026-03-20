@@ -186,8 +186,14 @@ class SongMemory:
                     return ann.end_phoneme
         return None
 
-    def build_prompt(self) -> str:
+    def build_prompt(self, use_ccl: bool = True) -> str:
         """Build the generation prompt in Mistral-instruct format.
+
+        Parameters
+        ----------
+        use_ccl : bool
+            If True, use Cortical Creative Loop format (PERCEIVE→INTENT→PREDICT).
+            If False, use legacy format with [GENRE_START]/[GENRE_END].
 
         Training wraps data as ``[INST] … [/INST]{completion}``, so inference
         must use the same format.  The model generates everything after
@@ -199,34 +205,102 @@ class SongMemory:
         if self.sections:
             arc, section = self.sections[-1]
             structure_hint = f"[{section}]"
+            current_arc = arc
         else:
             structure_hint = "[VERSE]"
+            current_arc = "[SETUP]"
 
         instruction = f"[INST] Write {self.genre} lyrics ({structure_hint}): [/INST]"
         parts.append(instruction)
 
-        # Style DNA prefix for richer prompting
-        if self.style_dna is not None and _HAS_STYLE_DNA:
-            try:
-                parts.append(style_to_prompt_prefix(self.style_dna))
-            except Exception:
-                pass
-        parts.append(f"[GENRE_START] {self.genre} [GENRE_END]")
+        if use_ccl:
+            # === Cortical Creative Loop Format ===
+            # Matches training format: PERCEIVE → INTENT → PREDICT
 
-        # Inject felt state — emotion as generative INPUT not scoring criterion
-        if self.felt_state_engine:
-            parts.append(self.felt_state_engine.state.to_prompt_token())
+            # Compute perception signals
+            n_lines = len(self.accepted_lines)
+            section_name = self.sections[-1][1] if self.sections else "VERSE"
+            position = f"{n_lines + 1}/16"  # rough estimate
 
-        # Inject active semantic field — primed vocabulary cloud
-        if self.semantic_priming:
-            priming_fragment = self.semantic_priming.get_prompt_fragment(n=6)
-            if priming_fragment:
-                parts.append(priming_fragment)
-        if self.sections:
-            arc, section = self.sections[-1]
-            parts.append(f"[{section}] {arc}")
-        for line in self.accepted_lines[-20:]:  # last 20 lines as context
-            parts.append(line)
+            # Estimate emotional state from recent lines
+            valence_label = "neutral"
+            arousal_label = "moderate"
+            if self.felt_state_engine:
+                state = self.felt_state_engine.state
+                v = state.valence
+                a = state.arousal
+                if v < -0.3:
+                    valence_label = "dark"
+                elif v < 0.0:
+                    valence_label = "melancholic"
+                elif v < 0.3:
+                    valence_label = "neutral"
+                elif v < 0.5:
+                    valence_label = "warm"
+                else:
+                    valence_label = "uplifting"
+                if a < 0.3:
+                    arousal_label = "calm"
+                elif a < 0.5:
+                    arousal_label = "moderate"
+                elif a < 0.7:
+                    arousal_label = "energetic"
+                else:
+                    arousal_label = "intense"
+
+            # Rhythm label
+            rhythm_label = "moderate"
+
+            # PERCEIVE
+            perceive = (
+                f"[PERCEIVE] [CONTEXT] section={section_name} position={position} "
+                f"[EMO_STATE] valence={valence_label} arousal={arousal_label} "
+                f"[RHYTHM_STATE] flow={rhythm_label}"
+            )
+            parts.append(perceive)
+
+            # INTENT
+            rhyme_scheme = self.rhyme_scheme if self.rhyme_scheme else "free"
+            intent = (
+                f"[INTENT] {current_arc} "
+                f"[TARGET_EMO] {valence_label} "
+                f"[TARGET_RHYTHM] {rhythm_label} "
+                f"[TARGET_NOVELTY] varied"
+            )
+            parts.append(intent)
+
+            # PREDICT - This is where generation starts
+            parts.append("[PREDICT]")
+
+            # Add context lines
+            for line in self.accepted_lines[-10:]:
+                parts.append(line)
+
+        else:
+            # === Legacy Format ===
+            # Style DNA prefix for richer prompting
+            if self.style_dna is not None and _HAS_STYLE_DNA:
+                try:
+                    parts.append(style_to_prompt_prefix(self.style_dna))
+                except Exception:
+                    pass
+            parts.append(f"[GENRE_START] {self.genre} [GENRE_END]")
+
+            # Inject felt state — emotion as generative INPUT not scoring criterion
+            if self.felt_state_engine:
+                parts.append(self.felt_state_engine.state.to_prompt_token())
+
+            # Inject active semantic field — primed vocabulary cloud
+            if self.semantic_priming:
+                priming_fragment = self.semantic_priming.get_prompt_fragment(n=6)
+                if priming_fragment:
+                    parts.append(priming_fragment)
+            if self.sections:
+                arc, section = self.sections[-1]
+                parts.append(f"[{section}] {arc}")
+            for line in self.accepted_lines[-20:]:  # last 20 lines as context
+                parts.append(line)
+
         return "\n".join(parts) + "\n"
 
 
@@ -436,7 +510,9 @@ class LyricsEngine:
         tokenizer: PreTrainedTokenizer,
         device: str = "cpu",
         beam_size: int = 8,
+        use_ccl_format: bool = True,  # Use Cortical Creative Loop format
     ):
+        self.use_ccl_format = use_ccl_format
         runtime_device = device
         model_runtime_device = self._normalize_device_value(getattr(model, "device", device))
         hf_device_map = (
@@ -784,7 +860,7 @@ class LyricsEngine:
           8. Surprise engine → violation × resolution final selection
           9. Revision instinct → targeted repair if needed
         """
-        prompt = memory.build_prompt()
+        prompt = memory.build_prompt(use_ccl=self.use_ccl_format)
         section_key = self._normalize_section_name(section)
 
         # ── Step 1: Flow-adaptive generation parameters ───────────────────
