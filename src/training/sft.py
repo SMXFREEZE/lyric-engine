@@ -69,16 +69,25 @@ def train_sft(
     base, tokenizer = load_for_training(base_model, use_4bit=use_4bit and device == "cuda")
 
     # prepare_model_for_kbit_training MUST run before apply_lora on 4-bit models.
-    # It casts non-LoRA weights to float32 for numerically stable gradient flow,
-    # sets up gradient checkpointing in a bitsandbytes-compatible way, and ensures
-    # the embedding layer isn't frozen.  Skipping this is the primary cause of
-    # NaN losses and token-soup outputs with 4-bit training.
+    # On T4 (14.5GB) the model already occupies ~13.3GB, leaving barely 500MB.
+    # The default call tries to upcast ALL LayerNorm/embedding params to float32
+    # which spikes memory and OOMs.  We avoid the spike by:
+    #   1. Aggressively freeing memory first
+    #   2. Disabling gradient checkpointing inside prepare (we enable it after LoRA)
+    #   3. Manually casting only the trainable LoRA params — not the whole model
     if use_4bit and device == "cuda":
+        import gc
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        free_before = torch.cuda.mem_get_info()[0] / 1e9
+        print(f"  [sft] GPU free before prepare: {free_before:.2f} GB")
         base = prepare_model_for_kbit_training(
             base,
-            use_gradient_checkpointing=True,
-            gradient_checkpointing_kwargs={"use_reentrant": False},
+            use_gradient_checkpointing=False,   # avoid float32 upcast spike
         )
+        gc.collect()
+        torch.cuda.empty_cache()
         print("  [sft] prepare_model_for_kbit_training applied")
     else:
         base.gradient_checkpointing_enable(
@@ -86,10 +95,16 @@ def train_sft(
         )
 
     base = apply_lora(base, rank=lora_rank, alpha=lora_alpha)
-    # gradient_checkpointing_enable is already called inside
-    # prepare_model_for_kbit_training for the 4-bit path; skip the duplicate call.
-    if not (use_4bit and device == "cuda"):
-        base.gradient_checkpointing_enable()
+
+    # Enable gradient checkpointing AFTER LoRA injection.
+    # On 4-bit models this is safe and avoids the memory spike of doing it earlier.
+    if use_4bit and device == "cuda":
+        base.enable_input_require_grads()
+        base.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False}
+        )
+    elif not (use_4bit and device == "cuda"):
+        pass  # already enabled above for non-4bit path
     model = LyricsModel(base, d_model=base.config.hidden_size)
 
     quantized_kaggle_safe = use_4bit and device == "cuda"
