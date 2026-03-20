@@ -129,92 +129,120 @@ def train_sft(
         )
 
     global_step = 0
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0.0
-        pbar = tqdm(train_dl, desc=f"Epoch {epoch+1}/{epochs}", disable=not accelerator.is_main_process)
+    last_saved_epoch = 0
+    interrupted = False
 
-        for step, batch in enumerate(pbar):
-            # For the quantized Kaggle path the model is NOT prepared by accelerator,
-            # so accelerator.accumulate(model) cannot track sync boundaries correctly.
-            # Use a manual step-based accumulation check instead.
-            is_accumulation_step = ((step + 1) % grad_accum_steps != 0) and (step + 1 < len(train_dl))
+    try:
+        for epoch in range(epochs):
+            model.train()
+            total_loss = 0.0
+            pbar = tqdm(train_dl, desc=f"Epoch {epoch+1}/{epochs}", disable=not accelerator.is_main_process)
 
-            # Inject viral DNA: add as a bias to the style vector
-            style_vec = batch.get("style_vec")
-            if viral_conditioning is not None and style_vec is not None:
-                viral_t = torch.tensor(viral_conditioning, dtype=style_vec.dtype, device=style_vec.device)
-                sv_dim = style_vec.shape[-1]
-                v_dim  = viral_t.shape[0]
-                if v_dim < sv_dim:
-                    viral_t = torch.nn.functional.pad(viral_t, (0, sv_dim - v_dim))
-                else:
-                    viral_t = viral_t[:sv_dim]
-                style_vec = style_vec + 0.1 * viral_t.unsqueeze(0)
+            for step, batch in enumerate(pbar):
+                # For the quantized Kaggle path the model is NOT prepared by accelerator,
+                # so accelerator.accumulate(model) cannot track sync boundaries correctly.
+                # Use a manual step-based accumulation check instead.
+                is_accumulation_step = ((step + 1) % grad_accum_steps != 0) and (step + 1 < len(train_dl))
 
-            out = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                phoneme_ids=batch.get("phoneme_ids"),
-                style_vec=style_vec,
-                labels=batch["labels"],
-            )
+                # Inject viral DNA: add as a bias to the style vector
+                style_vec = batch.get("style_vec")
+                if viral_conditioning is not None and style_vec is not None:
+                    viral_t = torch.tensor(viral_conditioning, dtype=style_vec.dtype, device=style_vec.device)
+                    sv_dim = style_vec.shape[-1]
+                    v_dim  = viral_t.shape[0]
+                    if v_dim < sv_dim:
+                        viral_t = torch.nn.functional.pad(viral_t, (0, sv_dim - v_dim))
+                    else:
+                        viral_t = viral_t[:sv_dim]
+                    style_vec = style_vec + 0.1 * viral_t.unsqueeze(0)
 
-            loss = out["lm_loss"]
+                out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    phoneme_ids=batch.get("phoneme_ids"),
+                    style_vec=style_vec,
+                    labels=batch["labels"],
+                )
 
-            # Guard against NaN loss (can occur early in 4-bit training)
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"  [sft] WARNING: NaN/Inf loss at step {step}, skipping batch")
-                optimizer.zero_grad()
-                continue
+                loss = out["lm_loss"]
 
-            # Add phonetic head loss if available
-            if "phoneme_logits" in out and "phoneme_ids" in batch:
-                ph_loss = phonetic_head_loss(out["phoneme_logits"], batch["phoneme_ids"])
-                if not (torch.isnan(ph_loss) or torch.isinf(ph_loss)):
-                    loss = loss + phonetic_loss_weight * ph_loss
+                # Guard against NaN loss (can occur early in 4-bit training)
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"  [sft] WARNING: NaN/Inf loss at step {step}, skipping batch")
+                    optimizer.zero_grad()
+                    continue
 
-            # Scale loss for gradient accumulation
-            scaled_loss = loss / grad_accum_steps
-            accelerator.backward(scaled_loss)
+                # Add phonetic head loss if available
+                if "phoneme_logits" in out and "phoneme_ids" in batch:
+                    ph_loss = phonetic_head_loss(out["phoneme_logits"], batch["phoneme_ids"])
+                    if not (torch.isnan(ph_loss) or torch.isinf(ph_loss)):
+                        loss = loss + phonetic_loss_weight * ph_loss
 
-            if not is_accumulation_step:
-                accelerator.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                scheduler.step()
-                optimizer.zero_grad()
+                # Scale loss for gradient accumulation
+                scaled_loss = loss / grad_accum_steps
+                accelerator.backward(scaled_loss)
 
-            global_step += 1
-            total_loss += loss.item()
+                if not is_accumulation_step:
+                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
 
+                global_step += 1
+                total_loss += loss.item()
+
+                if accelerator.is_main_process:
+                    pbar.set_postfix({"loss": f"{loss.item():.4f}", "step": global_step})
+
+            # Validation
+            if val_dl:
+                model.eval()
+                val_loss = 0.0
+                with torch.no_grad():
+                    for batch in val_dl:
+                        out = model(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            labels=batch["labels"],
+                        )
+                        val_loss += out["lm_loss"].item()
+                val_loss /= len(val_dl)
+                if accelerator.is_main_process:
+                    print(f"  Val loss: {val_loss:.4f}")
+
+            # Save checkpoint
             if accelerator.is_main_process:
-                pbar.set_postfix({"loss": f"{loss.item():.4f}", "step": global_step})
+                ckpt_path = f"{output_subdir}/epoch_{epoch+1}"
+                accelerator.unwrap_model(model).save(ckpt_path)
+                tokenizer.save_pretrained(ckpt_path)
+                last_saved_epoch = epoch + 1
+                print(f"  Saved checkpoint → {ckpt_path}")
 
-        # Validation
-        if val_dl:
-            model.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for batch in val_dl:
-                    out = model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"],
-                    )
-                    val_loss += out["lm_loss"].item()
-            val_loss /= len(val_dl)
-            if accelerator.is_main_process:
-                print(f"  Val loss: {val_loss:.4f}")
-
-        # Save checkpoint
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\n[sft] Interrupted — saving emergency checkpoint...")
         if accelerator.is_main_process:
-            ckpt_path = f"{output_subdir}/epoch_{epoch+1}"
-            accelerator.unwrap_model(model).save(ckpt_path)
-            tokenizer.save_pretrained(ckpt_path)
-            print(f"  Saved checkpoint → {ckpt_path}")
+            # Save at the current step within the interrupted epoch
+            partial_epoch_label = f"epoch_{last_saved_epoch + 1}_partial_step_{global_step}"
+            ckpt_path = f"{output_subdir}/{partial_epoch_label}"
+            try:
+                accelerator.unwrap_model(model).save(ckpt_path)
+                tokenizer.save_pretrained(ckpt_path)
+                print(f"[sft] Emergency checkpoint saved → {ckpt_path}")
+                print(f"[sft] Trained {global_step} steps total before interrupt")
+            except Exception as save_exc:
+                print(f"[sft] WARNING: emergency save failed: {save_exc}")
 
     if accelerator.is_main_process:
-        print(f"\nTraining complete. Final checkpoint: {output_subdir}/epoch_{epochs}")
+        if interrupted:
+            last_ckpt = (
+                f"{output_subdir}/epoch_{last_saved_epoch + 1}_partial_step_{global_step}"
+                if last_saved_epoch < epochs
+                else f"{output_subdir}/epoch_{last_saved_epoch}"
+            )
+            print(f"\nInterrupted at step {global_step}. Last checkpoint: {last_ckpt}")
+        else:
+            print(f"\nTraining complete. Final checkpoint: {output_subdir}/epoch_{epochs}")
 
 
 if __name__ == "__main__":
