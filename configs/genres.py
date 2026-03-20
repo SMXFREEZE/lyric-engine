@@ -124,12 +124,74 @@ FLOW_TOKENS = [
     "[SYNCOPATED]", "[MELODIC]", "[STACCATO]", "[NARRATIVE]",
 ]
 
-# All special tokens combined
-SPECIAL_TOKENS = ARC_TOKENS + SECTION_TOKENS + FLOW_TOKENS + [
-    "[GENRE_START]", "[GENRE_END]",
-    "[STYLE_START]", "[STYLE_END]",
-    "[RHYME_AABB]", "[RHYME_ABAB]", "[RHYME_ABCB]", "[RHYME_FREE]",
+# ── Cortical Creative Loop tokens ────────────────────────────────────────────
+# Brain-inspired tokens based on predictive coding, creative cognition networks,
+# and error-driven learning research. The loop is:
+#   PERCEIVE → INTENT → PREDICT → ERROR → REVISE → SELECT → MEMORY
+#
+# This maps to brain systems:
+#   - Perception: bottom-up sensory encoding
+#   - Intention: prefrontal goal formation
+#   - Prediction: Default Mode Network generative function
+#   - Error: Executive Control Network evaluation
+#   - Selection: Salience Network relevance filtering
+#   - Memory: Hippocampal consolidation
+
+CORTICAL_TOKENS = [
+    # ── Perception phase (bottom-up context encoding) ──
+    "[PERCEIVE]",       # Begin perception block: encode current context
+    "[CONTEXT]",        # Section position, structural context
+    "[EMO_STATE]",      # Current emotional state (valence/arousal)
+    "[RHYTHM_STATE]",   # Current rhythmic/flow state
+
+    # ── Intention phase (prefrontal goal formation) ──
+    "[INTENT]",         # Form generation goal
+    "[TARGET_EMO]",     # Target emotional shift
+    "[TARGET_RHYTHM]",  # Target rhythmic pattern
+    "[TARGET_NOVELTY]", # Target surprise/novelty level
+
+    # ── Prediction phase (DMN - generative) ──
+    "[PREDICT]",        # Initial prediction/draft
+    "[CANDIDATE_A]",    # Alternative candidate A
+    "[CANDIDATE_B]",    # Alternative candidate B
+
+    # ── Error detection phase (ECN - evaluative) ──
+    "[ERROR]",          # Error signal block
+    "[ERR_EMOTION]",    # Emotional mismatch detected
+    "[ERR_RHYTHM]",     # Rhythmic weakness
+    "[ERR_NOVELTY]",    # Too predictable / lacks surprise
+    "[ERR_COHERENCE]",  # Doesn't fit context
+    "[ERR_RHYME]",      # Rhyme scheme violation
+    "[NO_ERROR]",       # No significant errors detected
+
+    # ── Revision phase (update based on error) ──
+    "[REVISE]",         # Improved version
+
+    # ── Selection phase (Salience - choose what matters) ──
+    "[SELECT]",         # Final chosen output
+    "[CHOSEN]",         # DPO: preferred candidate
+    "[REJECTED]",       # DPO: non-preferred candidate
+
+    # ── Memory consolidation phase ──
+    "[MEMORY]",         # Compact state summary for continuity
+    "[MOTIF]",          # Recurring pattern to remember
 ]
+
+# Legacy metacognitive tokens (kept for backwards compatibility)
+METACOG_TOKENS = [
+    "[PLAN]", "[SECTION_GOAL]", "[EMOTION_TARGET]",
+    "[DRAFT]", "[CRITIQUE]", "[REVISION]", "[FINAL]",
+]
+
+# All special tokens combined
+SPECIAL_TOKENS = (
+    ARC_TOKENS + SECTION_TOKENS + FLOW_TOKENS +
+    CORTICAL_TOKENS + METACOG_TOKENS + [
+        "[GENRE_START]", "[GENRE_END]",
+        "[STYLE_START]", "[STYLE_END]",
+        "[RHYME_AABB]", "[RHYME_ABAB]", "[RHYME_ABCB]", "[RHYME_FREE]",
+    ]
+)
 
 # ── LoRA configuration ────────────────────────────────────────────────────────
 
