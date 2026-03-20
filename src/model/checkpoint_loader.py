@@ -117,10 +117,24 @@ def load_base(
             bnb_4bit_use_double_quant=True,
         )
 
+    max_memory = None
     if device_map_override is not None:
         dm = device_map_override
     elif torch.cuda.is_available():
-        dm = "auto"
+        # On Kaggle T4 x2, a plain "auto" placement often over-fills GPU 0 during
+        # Mistral materialization. Keep explicit headroom on every GPU and bias the
+        # loader away from GPU 0 so training prep still has room to run.
+        if use_4bit and torch.cuda.device_count() > 1:
+            dm = "balanced_low_0"
+            max_memory = {}
+            for i in range(torch.cuda.device_count()):
+                total_gib = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+                headroom_gib = 3 if i == 0 else 2
+                budget_gib = max(10, int(total_gib - headroom_gib))
+                max_memory[i] = f"{budget_gib}GiB"
+            max_memory["cpu"] = "48GiB"
+        else:
+            dm = "auto"
     else:
         dm = None
 
@@ -128,6 +142,7 @@ def load_base(
         name,
         quantization_config=bnb_config,
         device_map=dm,
+        max_memory=max_memory,
         low_cpu_mem_usage=True,
         torch_dtype=torch.float32 if device == "cpu" else torch.float16,
     )
