@@ -54,6 +54,13 @@ from src.model.metacognitive_engine import (
 )
 from src.model.research_scoring import research_score
 
+# ── New human-brain cognitive modules ────────────────────────────────────────
+from src.model.felt_state import FeltStateEngine
+from src.model.semantic_priming import SemanticPrimingEngine
+from src.model.predictive_coder import PredictiveCoder, build_expectation
+from src.model.surprise_engine import SurpriseEngine
+from src.model.flow_controller import FlowController, RevisionInstinct, InhibitionOfReturn
+
 # Style DNA — used for auto-populating SongMemory defaults and scoring
 try:
     from src.data.style_dna import STYLES as _STYLE_LIBRARY, StyleDNA, style_to_prompt_prefix
@@ -91,6 +98,16 @@ class SongMemory:
     last_workspace: Optional[dict] = None
     style_dna: Optional[object] = None      # StyleDNA from style_dna.py
 
+    # ── Human brain cognitive state ───────────────────────────────────────
+    # These five systems model the pre-verbal, embodied, associative, predictive,
+    # and flow-based processes that drive human lyric writing.
+    felt_state_engine:    Optional[FeltStateEngine]     = field(default=None, repr=False)
+    semantic_priming:     Optional[SemanticPrimingEngine] = field(default=None, repr=False)
+    surprise_engine:      Optional[SurpriseEngine]      = field(default=None, repr=False)
+    flow_controller:      Optional[FlowController]      = field(default=None, repr=False)
+    inhibition_of_return: Optional[InhibitionOfReturn]  = field(default=None, repr=False)
+    revision_instinct:    Optional[RevisionInstinct]    = field(default=None, repr=False)
+
     def __post_init__(self):
         """Auto-populate defaults from Style DNA when available."""
         explicit_rhyme_scheme = self.rhyme_scheme is not _AUTO_DEFAULT
@@ -113,7 +130,16 @@ class SongMemory:
         else:
             self.rhyme_scheme = "AABB"
 
-    def add_line(self, line: str, section: str = "verse1"):
+        # Initialise human-brain cognitive systems
+        initial_section = self.sections[-1][1] if self.sections else "intro"
+        self.felt_state_engine    = FeltStateEngine(self.genre, initial_section)
+        self.semantic_priming     = SemanticPrimingEngine(self.genre)
+        self.surprise_engine      = SurpriseEngine()
+        self.flow_controller      = FlowController(base_beam_size=8)
+        self.inhibition_of_return = InhibitionOfReturn()
+        self.revision_instinct    = RevisionInstinct()
+
+    def add_line(self, line: str, section: str = "verse1", quality_score: float = 0.5):
         self.accepted_lines.append(line)
         ann = annotate_line(line)
         if ann.end_phoneme:
@@ -125,6 +151,16 @@ class SongMemory:
         if section not in self.sections_lines:
             self.sections_lines[section] = []
         self.sections_lines[section].append(line)
+
+        # Update human-brain cognitive systems
+        if self.felt_state_engine:
+            self.felt_state_engine.contagion_update(line)
+        if self.semantic_priming:
+            self.semantic_priming.update(line)
+        if self.inhibition_of_return:
+            self.inhibition_of_return.mark_used(line)
+        if self.flow_controller:
+            self.flow_controller.update(quality_score)
 
     def get_target_end_phoneme(self) -> Optional[str]:
         """
@@ -176,6 +212,16 @@ class SongMemory:
             except Exception:
                 pass
         parts.append(f"[GENRE_START] {self.genre} [GENRE_END]")
+
+        # Inject felt state — emotion as generative INPUT not scoring criterion
+        if self.felt_state_engine:
+            parts.append(self.felt_state_engine.state.to_prompt_token())
+
+        # Inject active semantic field — primed vocabulary cloud
+        if self.semantic_priming:
+            priming_fragment = self.semantic_priming.get_prompt_fragment(n=6)
+            if priming_fragment:
+                parts.append(priming_fragment)
         if self.sections:
             arc, section = self.sections[-1]
             parts.append(f"[{section}] {arc}")
@@ -722,55 +768,158 @@ class LyricsEngine:
         section: str = "verse1",
     ) -> list[CandidateScore]:
         """
-        Generate and rank candidates using the full Cognitive Music scoring.
-        top_n=1 → auto mode, top_n=3 → co-write mode.
+        Generate and rank candidates using the full human-brain cognitive pipeline.
+
+        Generation order:
+          1. Flow controller → adaptive temperature + beam size
+          2. Felt state → emotion-conditioned prompt
+          3. Semantic priming → active vocabulary cloud in prompt
+          4. Divergent/convergent generation
+          5. ITPRA expectation evaluation
+          6. Inhibition of return → novelty suppression
+          7. Metacognitive workspace → System 1/2 mode
+          8. Surprise engine → violation × resolution final selection
+          9. Revision instinct → targeted repair if needed
         """
         prompt = memory.build_prompt()
         section_key = self._normalize_section_name(section)
-        candidates = self.generate_candidates(prompt)
+
+        # ── Step 1: Flow-adaptive generation parameters ───────────────────
+        flow_snap = (
+            memory.flow_controller.get_current_snapshot()
+            if memory.flow_controller
+            else None
+        )
+        generation_temp = (
+            flow_snap.suggested_temperature
+            if flow_snap
+            else 0.85
+        )
+        # Felt state also modulates temperature
+        if memory.felt_state_engine:
+            generation_temp = (
+                generation_temp * 0.6
+                + memory.felt_state_engine.emotional_temperature() * 0.4
+            )
+        effective_beam = (
+            flow_snap.suggested_beam_size if flow_snap else self.beam_size
+        )
 
         line_idx = len(memory.accepted_lines)
-        scored = self._score_candidates(
-            candidates,
-            memory,
-            target_arc_valence,
-            target_arc_arousal,
+
+        # ── Step 2: Build expectation (ITPRA — Prediction stage) ──────────
+        expectation = build_expectation(
+            accepted_lines=memory.accepted_lines,
+            genre=memory.genre,
             section=section_key,
-            line_idx=line_idx,
+            target_end_phoneme=memory.get_target_end_phoneme(),
+            target_syllables=memory.target_syllables,
         )
+
+        # ── Step 3: Generate candidates ───────────────────────────────────
+        candidates = self.generate_candidates(
+            prompt,
+            temperature=float(np.clip(generation_temp, 0.6, 1.2)),
+        )
+
+        # ── Step 4: Score candidates (existing pipeline) ──────────────────
+        scored = self._score_candidates(
+            candidates, memory,
+            target_arc_valence, target_arc_arousal,
+            section=section_key, line_idx=line_idx,
+        )
+
+        # ── Step 5: Inhibition of return — discount recently used vocab ───
+        if memory.inhibition_of_return:
+            for item in scored:
+                suppression = memory.inhibition_of_return.suppression_score(item.text)
+                # Novelty bonus already in score; apply suppression penalty
+                item.novelty_score = float(np.clip(
+                    item.novelty_score - suppression * 0.25, 0.0, 1.0
+                ))
+                item.total_score = float(np.clip(
+                    item.total_score - suppression * 0.10, 0.0, 1.0
+                ))
+
+        # ── Step 6: Metacognitive workspace ───────────────────────────────
         ranked, workspace = self._rank_with_workspace(
-            scored,
-            memory,
-            section=section_key,
-            line_idx=line_idx,
+            scored, memory, section=section_key, line_idx=line_idx,
             target_arc_valence=target_arc_valence,
             target_arc_arousal=target_arc_arousal,
         )
 
+        # ── Step 7: Revision instinct — targeted repair if needed ─────────
         meta = workspace.get("metacognition", {})
-        if meta.get("needs_regeneration"):
-            repair_candidates = self.generate_candidates(
-                prompt,
-                temperature=float(meta.get("suggested_temperature", 0.64)),
-                top_p=0.82,
+        if meta.get("needs_regeneration") and memory.revision_instinct and ranked:
+            revision_target = memory.revision_instinct.diagnose(
+                ranked[0].text,
+                ranked[0],
+                target_syllables=memory.target_syllables,
+                target_phoneme=memory.get_target_end_phoneme(),
             )
-            repair_scored = self._score_candidates(
-                repair_candidates,
-                memory,
-                target_arc_valence,
-                target_arc_arousal,
+            if revision_target:
+                repair_temp = float(np.clip(
+                    float(meta.get("suggested_temperature", 0.64))
+                    + revision_target.temperature_modifier,
+                    0.5, 1.0,
+                ))
+                repair_prompt = memory.revision_instinct.build_repair_prompt(
+                    prompt, revision_target
+                )
+                repair_candidates = self.generate_candidates(repair_prompt, temperature=repair_temp)
+                repair_scored = self._score_candidates(
+                    repair_candidates, memory,
+                    target_arc_valence, target_arc_arousal,
+                    section=section_key, line_idx=line_idx,
+                )
+                combined = self._merge_candidate_pools(scored, repair_scored)
+                ranked, workspace = self._rank_with_workspace(
+                    combined, memory, section=section_key, line_idx=line_idx,
+                    target_arc_valence=target_arc_valence,
+                    target_arc_arousal=target_arc_arousal,
+                )
+            else:
+                # Fallback: standard repair without targeted prompt
+                repair_candidates = self.generate_candidates(
+                    prompt, temperature=float(meta.get("suggested_temperature", 0.64)), top_p=0.82,
+                )
+                repair_scored = self._score_candidates(
+                    repair_candidates, memory,
+                    target_arc_valence, target_arc_arousal,
+                    section=section_key, line_idx=line_idx,
+                )
+                combined = self._merge_candidate_pools(scored, repair_scored)
+                ranked, workspace = self._rank_with_workspace(
+                    combined, memory, section=section_key, line_idx=line_idx,
+                    target_arc_valence=target_arc_valence,
+                    target_arc_arousal=target_arc_arousal,
+                )
+
+        # ── Step 8: Surprise engine — violation × resolution selection ────
+        if memory.surprise_engine and ranked:
+            previous_line = memory.accepted_lines[-1] if memory.accepted_lines else None
+            surprise_decision = memory.surprise_engine.select(
+                candidates=[r.text for r in ranked],
+                expectation=expectation,
+                tension=memory.tension_curve.current,
                 section=section_key,
+                bar_position=line_idx % 8,
                 line_idx=line_idx,
+                previous_line=previous_line,
             )
-            combined = self._merge_candidate_pools(scored, repair_scored)
-            ranked, workspace = self._rank_with_workspace(
-                combined,
-                memory,
-                section=section_key,
-                line_idx=line_idx,
-                target_arc_valence=target_arc_valence,
-                target_arc_arousal=target_arc_arousal,
-            )
+            workspace["surprise_decision"] = {
+                "was_surprise": surprise_decision.was_surprise,
+                "probability": round(surprise_decision.surprise_probability, 3),
+                "violation": round(surprise_decision.violation_score, 3),
+                "resolution": round(surprise_decision.resolution_score, 3),
+                "reason": surprise_decision.reason,
+            }
+            # Re-order ranked so the surprise decision's choice is first
+            if surprise_decision.was_surprise:
+                chosen_text = surprise_decision.chosen_text
+                reordered = [r for r in ranked if r.text == chosen_text]
+                rest = [r for r in ranked if r.text != chosen_text]
+                ranked = reordered + rest
 
         memory.last_workspace = workspace
         memory.workspace_history.append(workspace)
@@ -807,13 +956,21 @@ class LyricsEngine:
         memory.tension_curve.reset_for_section(section)
         memory.sections_lines[section_key] = []
 
+        # Transition all cognitive systems to new section
+        if memory.felt_state_engine:
+            memory.felt_state_engine.section_transition(section_key)
+        if memory.semantic_priming:
+            memory.semantic_priming.reset_for_section()
+        if memory.surprise_engine:
+            memory.surprise_engine.reset_for_section(section_key)
+
         generated_lines = []
         for _ in range(num_lines):
             top = self.generate_line(memory, target_val, target_aro, top_n=1, section=section_key)
             if top:
                 best = top[0]
                 if auto_accept:
-                    memory.add_line(best.text, section=section_key)
+                    memory.add_line(best.text, section=section_key, quality_score=best.total_score)
                 generated_lines.append(best.text)
 
         return generated_lines
