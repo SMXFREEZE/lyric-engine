@@ -46,6 +46,7 @@ from src.model.dopamine_arc import (
     goosebump_potential, hook_dna_score, TensionCurve, analyze_song_dopamine,
 )
 from src.model.research_scoring import research_score
+from src.model.metacognitive_engine import MetacognitiveWorkspace, GenerationTrace
 
 
 # ── Syllable counter (deterministic, no LLM) ─────────────────────────────────
@@ -368,11 +369,24 @@ class LyricsEngine:
         device: str = "cpu",
         beam_size: int = 8,
     ):
-        self.model = model.to(device)
+        # Quantized models (4-bit / 8-bit via bitsandbytes) are already placed by
+        # device_map='auto' and cannot be moved with .to().  Only call .to() when
+        # the model is on CPU and we explicitly want to move it.
+        if device != "cpu":
+            try:
+                first_param = next(model.parameters())
+                if first_param.device.type == "cpu":
+                    model = model.to(device)
+            except (StopIteration, RuntimeError):
+                pass  # quantized or empty model — leave as-is
+        self.model = model
         self.model.eval()
         self.tokenizer = tokenizer
         self.device = device
         self.beam_size = beam_size
+        # Initialize the Metacognitive Workspace (GWT + TRAP + HOT + MSV)
+        self.workspace = MetacognitiveWorkspace()
+        self.generation_traces: list[GenerationTrace] = []
 
     @torch.no_grad()
     def generate_candidates(
@@ -474,24 +488,58 @@ class LyricsEngine:
         section: str = "verse1",
     ) -> list[CandidateScore]:
         """
-        Generate and rank candidates using the full Cognitive Music scoring.
-        top_n=1 → auto mode, top_n=3 → co-write mode.
+        Generate and rank candidates using the FULL COGNITIVE ARCHITECTURE.
+
+        Flow:
+        1. LLM generates raw candidates (two-phase divergent/convergent)
+        2. MetacognitiveWorkspace runs all 7 specialized modules in parallel
+        3. MSV determines System 1 (creative) vs System 2 (deliberative)
+        4. Global Workspace selects winner with justification trace (GWT)
+        5. GenerationTrace (HOT) records what was generated and why
+        6. SelfModel (TRAP) learns per-module reliability for this session
         """
         prompt = memory.build_prompt()
         candidates = self.generate_candidates(prompt)
 
         line_idx = len(memory.accepted_lines)
-        scored = [
-            score_candidate(
-                c, memory,
-                target_arc_valence, target_arc_arousal,
-                section=section,
-                mood=memory.mood,
-                tension_state=memory.tension_curve.current,
-                line_idx=line_idx,
-            )
-            for c in candidates
-        ]
+
+        # Route through the Metacognitive Workspace (GWT + TRAP + HOT + MSV)
+        traces = self.workspace.evaluate_candidates(
+            candidates=candidates,
+            genre=memory.genre,
+            section=section,
+            mood=memory.mood,
+            target_end_phoneme=memory.get_target_end_phoneme(),
+            previous_line=memory.accepted_lines[-1] if memory.accepted_lines else None,
+            accepted_lines=memory.accepted_lines,
+            line_idx=line_idx,
+            tension_state=memory.tension_curve.current,
+            target_syllables=memory.target_syllables,
+        )
+
+        # Convert GenerationTraces to CandidateScore for backward compatibility
+        scored = []
+        for trace in traces:
+            ms = trace.module_scores
+            ann = annotate_line(trace.line)
+            scored.append(CandidateScore(
+                text=trace.line,
+                phonetic_score=ms.get("phonology", 0.0),
+                syllable_ok=abs(ann.total_syllables - memory.target_syllables) <= 3,
+                novelty_score=ms.get("semantic", 0.0),
+                valence_fit=ms.get("emotion", 0.0),
+                trajectory_fit=ms.get("emotion", 0.0),
+                texture_alignment=ms.get("texture", 0.0),
+                goosebump=ms.get("dopamine", 0.0),
+                hook_dna=ms.get("dopamine", 0.0),
+                polysyllabic_rhyme=ms.get("phonology", 0.0),
+                internal_rhyme=ms.get("phonology", 0.0),
+                complexity=ms.get("semantic", 0.0),
+                temporal_arc=ms.get("structure", 0.0),
+                introspection=ms.get("emotion", 0.0),
+                stress_alignment=ms.get("stress", 0.0),
+                total_score=trace.total_score,
+            ))
 
         ok = [s for s in scored if s.syllable_ok]
         ranked = sorted(ok or scored, key=lambda s: s.total_score, reverse=True)
@@ -525,12 +573,26 @@ class LyricsEngine:
         memory.sections_lines[section] = []
 
         generated_lines = []
-        for _ in range(num_lines):
+        for i in range(num_lines):
             top = self.generate_line(memory, target_val, target_aro, top_n=1, section=section)
             if top:
                 best = top[0]
                 if auto_accept:
                     memory.add_line(best.text, section=section)
+                    # Record the generation trace for session awareness (HOT + TRAP)
+                    traces = self.workspace.evaluate_candidates(
+                        candidates=[best.text],
+                        genre=memory.genre, section=section, mood=memory.mood,
+                        target_end_phoneme=memory.get_target_end_phoneme(),
+                        previous_line=memory.accepted_lines[-2] if len(memory.accepted_lines) > 1 else None,
+                        accepted_lines=memory.accepted_lines,
+                        line_idx=len(memory.accepted_lines) - 1,
+                        tension_state=memory.tension_curve.current,
+                        target_syllables=memory.target_syllables,
+                    )
+                    if traces:
+                        self.workspace.accept_line(traces[0])
+                        self.generation_traces.append(traces[0])
                 generated_lines.append(best.text)
 
         return generated_lines
@@ -673,6 +735,9 @@ class LyricsEngine:
             except Exception:
                 texture_summary[sec] = "n/a"
 
+        # Metacognitive session report (TRAP self-awareness)
+        session_report = self.workspace.get_session_report()
+
         return {
             "emotional_arc":  emotional_arc,
             "dopamine_arc":   dopamine_arc,
@@ -680,6 +745,11 @@ class LyricsEngine:
             "peak_moment": dopamine_arc.get("peak_moment", {}),
             "genre": memory.genre,
             "mood":  memory.mood,
+            # Metacognitive awareness - how the AI's brain worked
+            "metacognitive_report": session_report,
+            "generation_traces": [
+                t.summary() for t in self.generation_traces[-20:]
+            ],
         }
 
 

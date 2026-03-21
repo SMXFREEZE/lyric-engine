@@ -53,12 +53,19 @@ def load_base_model(
             bnb_4bit_use_double_quant=True,
         )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        name,
-        quantization_config=bnb_config,
-        device_map="auto" if torch.cuda.is_available() else None,
-        torch_dtype=torch.float32 if device == "cpu" else torch.bfloat16,
-    )
+    load_kwargs: dict = {
+        "device_map": "auto" if torch.cuda.is_available() else None,
+        "low_cpu_mem_usage": True,
+    }
+    if bnb_config:
+        # Do NOT set torch_dtype when using quantization_config — bitsandbytes
+        # manages precision internally.  Passing bfloat16 here forces the full
+        # fp16 weights onto the GPU before quantization, causing OOM on 16 GB GPUs.
+        load_kwargs["quantization_config"] = bnb_config
+    else:
+        load_kwargs["torch_dtype"] = torch.float32 if device == "cpu" else torch.bfloat16
+
+    model = AutoModelForCausalLM.from_pretrained(name, **load_kwargs)
     tokenizer = AutoTokenizer.from_pretrained(name)
     tokenizer.pad_token = tokenizer.eos_token
 
