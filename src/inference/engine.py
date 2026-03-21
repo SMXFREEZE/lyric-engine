@@ -392,7 +392,7 @@ class LyricsEngine:
     def generate_candidates(
         self,
         prompt: str,
-        max_new_tokens: int = 60,
+        max_new_tokens: int = 30,
         temperature: float = 0.85,
         top_p: float = 0.9,
     ) -> list[str]:
@@ -414,7 +414,7 @@ class LyricsEngine:
             prompt,
             return_tensors="pt",
             truncation=True,
-            max_length=768,
+            max_length=384,
         )
         input_ids = enc["input_ids"].to(self.device)
         attention_mask = enc["attention_mask"].to(self.device)
