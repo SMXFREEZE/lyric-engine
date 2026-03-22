@@ -35,6 +35,7 @@ from typing import Optional
 import numpy as np
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
+from transformers import LogitsProcessor, LogitsProcessorList
 
 from src.data.phoneme_annotator import annotate_line, LineAnnotation
 from src.data.rhyme_labeler import rhymes
@@ -47,6 +48,31 @@ from src.model.dopamine_arc import (
 )
 from src.model.research_scoring import research_score
 from src.model.metacognitive_engine import MetacognitiveWorkspace, GenerationTrace
+
+
+# ── Token suppression logits processor ───────────────────────────────────────
+
+class SuppressUnknownTokens(LogitsProcessor):
+    """
+    Set logits to -inf for any token ID >= max_valid_id.
+
+    WHY: The checkpoint was trained with vocab size 32065 but the inference
+    tokenizer only knows tokens 0–32018. Token IDs 32019–32064 cannot be
+    decoded to text, so letting the model sample them produces garbage
+    characters. Suppressing them forces generation to stay within the
+    decodable vocabulary while still benefiting from the LoRA weights.
+    """
+    def __init__(self, max_valid_id: int):
+        self.max_valid_id = max_valid_id
+
+    def __call__(
+        self,
+        input_ids: torch.LongTensor,
+        scores: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        if scores.shape[-1] > self.max_valid_id:
+            scores[:, self.max_valid_id:] = float("-inf")
+        return scores
 
 
 # ── Syllable counter (deterministic, no LLM) ─────────────────────────────────
@@ -422,6 +448,10 @@ class LyricsEngine:
 
         candidates = []
 
+        # Suppress token IDs that the tokenizer cannot decode (vocab mismatch fix)
+        suppress = SuppressUnknownTokens(len(self.tokenizer))
+        logits_proc = LogitsProcessorList([suppress])
+
         # ── Phase 1: Divergent (MPFC mode) ────────────────────────────────
         divergent_n = max(1, int(self.beam_size * 1.5))
         try:
@@ -430,11 +460,12 @@ class LyricsEngine:
                 attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
-                temperature=min(temperature * 1.3, 1.2),  # hotter = more creative
-                top_p=0.98,                                # nearly unconstrained
+                temperature=min(temperature * 1.3, 1.2),
+                top_p=0.98,
                 num_return_sequences=divergent_n,
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=eos,
+                logits_processor=logits_proc,
             )
             prompt_len = input_ids.shape[1]
             for out in out_divergent:
@@ -453,12 +484,13 @@ class LyricsEngine:
                 attention_mask=attention_mask,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
-                temperature=max(temperature * 0.7, 0.5),  # cooler = more structured
-                top_k=50,                                   # tighter vocabulary
+                temperature=max(temperature * 0.7, 0.5),
+                top_k=50,
                 top_p=0.85,
                 num_return_sequences=convergent_n,
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=eos,
+                logits_processor=logits_proc,
             )
             prompt_len = input_ids.shape[1]
             for out in out_convergent:
@@ -503,6 +535,9 @@ class LyricsEngine:
 
         line_idx = len(memory.accepted_lines)
 
+        # Current arc token (last section's arc)
+        arc_token = memory.sections[-1][0] if memory.sections else "[BUILD]"
+
         # Route through the Metacognitive Workspace (GWT + TRAP + HOT + MSV)
         traces = self.workspace.evaluate_candidates(
             candidates=candidates,
@@ -515,6 +550,7 @@ class LyricsEngine:
             line_idx=line_idx,
             tension_state=memory.tension_curve.current,
             target_syllables=memory.target_syllables,
+            arc_token=arc_token,
         )
 
         # Convert GenerationTraces to CandidateScore for backward compatibility
