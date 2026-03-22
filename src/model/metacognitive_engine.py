@@ -94,6 +94,8 @@ from src.model.research_scoring import (
     temporal_arc_score, introspection_score, vocabulary_novelty_score,
     stress_alignment_score,
 )
+from src.generation.surprise_engine import surprise_score, diagnose as surprise_diagnose
+from src.generation.flow_dna import flow_score, diagnose as flow_diagnose
 
 
 # =============================================================================
@@ -715,20 +717,150 @@ class SelfModel:
 
 
 # =============================================================================
+#  PART 5b: SURPRISE MODULE — Anterior Cingulate Cortex
+# =============================================================================
+
+class SurpriseModule:
+    """
+    Anterior Cingulate Cortex (ACC) — conflict detection + novelty drive.
+
+    The ACC fires when prediction errors occur: when the brain expected X
+    but got Y. This is the neural basis of "surprise" in music.
+
+    Great trap lines live in the VIRAL SWEET SPOT: familiar enough to be
+    understood, surprising enough to be remembered. This module scores for
+    that balance using the Predictive Surprise Engine (Huron 2006).
+
+    Score zones:
+      < 0.35 = too predictable (forgettable)
+      0.35–0.70 = viral sweet spot ✓
+      > 0.70 = too random (incoherent)
+    """
+    name = "surprise"
+
+    def evaluate(
+        self,
+        line: str,
+        genre: str,
+        accepted_lines: list[str],
+        **kwargs,
+    ) -> ModuleOutput:
+        score = surprise_score(line, genre, accepted_lines)
+        diag = surprise_diagnose(line, genre, accepted_lines)
+
+        flags: list[str] = []
+        if score < 0.35:
+            flags.append("TOO_PREDICTABLE")
+        elif score > 0.70:
+            flags.append("TOO_RANDOM")
+        else:
+            flags.append("SURPRISE_SWEET_SPOT")
+
+        if diag["cliche_penalty"] > 0.4:
+            flags.append("CLICHE_DETECTED")
+        if diag["structural"] > 0.5:
+            flags.append("STRUCTURAL_INVERSION")
+
+        # Remap score so sweet-spot (0.35-0.70) scores highest
+        # Peak reward at 0.52 (centre of sweet spot)
+        deviation = abs(score - 0.52)
+        normalised = max(0.0, 1.0 - deviation / 0.52)
+
+        return ModuleOutput(
+            module_name=self.name,
+            score=normalised,
+            confidence=0.80,
+            flags=flags,
+            reasoning=(
+                f"surprise={score:.2f} ({diag['verdict']}); "
+                f"vocab={diag['vocabulary']:.2f}, "
+                f"leap={diag['semantic_leap']:.2f}, "
+                f"structural={diag['structural']:.2f}"
+            ),
+            sub_scores={
+                "raw_surprise":   score,
+                "vocabulary":     diag["vocabulary"],
+                "semantic_leap":  diag["semantic_leap"],
+                "structural":     diag["structural"],
+                "cliche_penalty": diag["cliche_penalty"],
+            },
+        )
+
+
+# =============================================================================
+#  PART 5c: FLOW MODULE — Supplementary Motor Area (SMA)
+# =============================================================================
+
+class FlowModule:
+    """
+    Supplementary Motor Area (SMA) — rhythm production and motor-beat coupling.
+
+    The SMA is responsible for timing in music and speech. In freestyle rap,
+    it fires when the rapper "feels" the beat before they articulate.
+
+    This module scores how well the line's stress pattern matches the target
+    flow fingerprint for the current section/arc combination (e.g. triplet
+    for [BUILD]/VERSE, melodic for CHORUS/[PEAK]).
+
+    Uses the Flow DNA library of viral trap flows encoded as stress templates.
+    """
+    name = "flow"
+
+    def evaluate(
+        self,
+        line: str,
+        section: str,
+        arc_token: str,
+        **kwargs,
+    ) -> ModuleOutput:
+        diag = flow_diagnose(line, section, arc_token)
+        score = diag["score"]
+
+        flags: list[str] = []
+        if score > 0.65:
+            flags.append(f"FLOW_MATCH:{diag['target_flow']}")
+        elif score < 0.35:
+            flags.append("FLOW_MISMATCH")
+
+        best_alt = diag["ranking"][0][0] if diag["ranking"] else "unknown"
+        if best_alt != diag["target_flow"] and score < 0.50:
+            flags.append(f"BETTER_FLOW:{best_alt}")
+
+        return ModuleOutput(
+            module_name=self.name,
+            score=score,
+            confidence=0.78,
+            flags=flags,
+            reasoning=(
+                f"target={diag['target_flow']} ({diag['target_description']}); "
+                f"syllables={diag['actual_syllables']}/{diag['target_syllables']}; "
+                f"stress_fit={diag['stress_fit']:.2f}; "
+                f"key: {diag['key_feature']}"
+            ),
+            sub_scores={
+                "syllable_fit": diag["syllable_fit"],
+                "stress_fit":   diag["stress_fit"],
+                "density_fit":  diag["density_fit"],
+            },
+        )
+
+
+# =============================================================================
 #  PART 6: GLOBAL WORKSPACE - the consciousness layer
 # =============================================================================
 
 # Default module weights (before self-model adaptation).
-# These represent the relative importance of each cognitive function
-# in producing high-quality lyrics, derived from research findings.
+# Rebalanced to include surprise (ACC) and flow (SMA) — sum = 1.0
 DEFAULT_MODULE_WEIGHTS: dict[str, float] = {
-    "phonology": 0.22,    # rhyme is foundational (biggest quality predictor)
-    "stress":    0.10,    # rhythm matters but is more forgiving
-    "emotion":   0.18,    # emotional fit is what makes songs resonate
-    "semantic":  0.12,    # novelty prevents repetition
-    "structure": 0.13,    # temporal arc creates coherent songs
-    "texture":   0.10,    # phonosemantic is subtle but powerful
-    "dopamine":  0.15,    # goosebump moments are what make songs legendary
+    "phonology": 0.20,    # rhyme is foundational (biggest quality predictor)
+    "stress":    0.08,    # rhythm matters but is more forgiving
+    "emotion":   0.15,    # emotional fit is what makes songs resonate
+    "semantic":  0.10,    # novelty prevents repetition
+    "structure": 0.12,    # temporal arc creates coherent songs
+    "texture":   0.08,    # phonosemantic is subtle but powerful
+    "dopamine":  0.14,    # goosebump moments are what make songs legendary
+    "surprise":  0.08,    # ACC: predictive surprise sweet spot
+    "flow":      0.05,    # SMA: rhythmic fingerprint match
 }
 
 
@@ -753,7 +885,7 @@ class MetacognitiveWorkspace:
     """
 
     def __init__(self, weights: Optional[dict[str, float]] = None):
-        # Initialize the 7 specialized modules
+        # Initialize the 9 specialized modules
         self.modules = {
             "phonology": PhonologyModule(),
             "stress":    StressModule(),
@@ -762,6 +894,8 @@ class MetacognitiveWorkspace:
             "structure": StructureModule(),
             "texture":   TextureModule(),
             "dopamine":  DopamineModule(),
+            "surprise":  SurpriseModule(),
+            "flow":      FlowModule(),
         }
         self.base_weights = weights or DEFAULT_MODULE_WEIGHTS.copy()
         self.self_model = SelfModel()
@@ -834,7 +968,7 @@ class MetacognitiveWorkspace:
         Get module weights adjusted by the self-model's learning.
         This is TRAP Adaptation: the system adjusts its own strategy.
         """
-        adjusted = {}
+        adjusted: dict[str, float] = {}
         for mod_name, base_w in self.base_weights.items():
             adaptation = self.self_model.get_weight_adjustment(mod_name)
             adjusted[mod_name] = base_w * adaptation
@@ -856,21 +990,21 @@ class MetacognitiveWorkspace:
         line_idx: int,
         tension_state: float,
         target_syllables: int,
+        arc_token: str = "[BUILD]",
     ) -> dict[str, ModuleOutput]:
         """
-        Run all 7 specialized modules in parallel on a single candidate line.
+        Run all 9 specialized modules in parallel on a single candidate line.
         Each module produces a standardized ModuleOutput.
 
-        In the brain analogy: this is the moment where inferior frontal gyrus,
-        SMA, amygdala, Broca's area, DLPFC, planum polare, and nucleus accumbens
-        are all processing the same stimulus simultaneously and unconsciously.
+        Brain regions: inferior frontal gyrus, SMA, amygdala, Broca's area,
+        DLPFC, planum polare, nucleus accumbens, ACC (surprise), SMA (flow).
         """
         ann = annotate_line(line)
         rhymes_with = False
         if target_end_phoneme and ann.end_phoneme:
             rhymes_with = rhymes(ann.end_phoneme, target_end_phoneme)
 
-        outputs = {}
+        outputs: dict[str, ModuleOutput] = {}
         outputs["phonology"] = self.modules["phonology"].evaluate(
             line, target_end_phoneme, previous_line,
         )
@@ -891,6 +1025,12 @@ class MetacognitiveWorkspace:
         )
         outputs["dopamine"] = self.modules["dopamine"].evaluate(
             line, tension_state, previous_line, mood,
+        )
+        outputs["surprise"] = self.modules["surprise"].evaluate(
+            line, genre=genre, accepted_lines=accepted_lines,
+        )
+        outputs["flow"] = self.modules["flow"].evaluate(
+            line, section=section, arc_token=arc_token,
         )
         return outputs
 
@@ -992,6 +1132,7 @@ class MetacognitiveWorkspace:
         line_idx: int = 0,
         tension_state: float = 0.3,
         target_syllables: int = 10,
+        arc_token: str = "[BUILD]",
     ) -> list[GenerationTrace]:
         """
         THE MAIN ENTRY POINT - evaluate all candidate lines through the
@@ -1011,13 +1152,14 @@ class MetacognitiveWorkspace:
         if accepted_lines is None:
             accepted_lines = []
 
-        # Step 1: Run all 7 modules on every candidate
+        # Step 1: Run all 9 modules on every candidate
         all_outputs: list[dict[str, ModuleOutput]] = []
         for line in candidates:
             outputs = self._run_modules(
                 line, genre, section, mood,
                 target_end_phoneme, previous_line,
                 accepted_lines, line_idx, tension_state, target_syllables,
+                arc_token=arc_token,
             )
             all_outputs.append(outputs)
 
