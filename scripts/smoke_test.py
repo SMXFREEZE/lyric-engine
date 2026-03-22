@@ -96,7 +96,7 @@ def test_lyrics_model():
 
 
 def test_inference_engine():
-    print("\n--Inference Engine (GPT-2, 3 beams) --")
+    print("\n-- Inference Engine (GPT-2, 3 beams, metacognitive workspace) --")
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from src.inference.engine import LyricsEngine, SongMemory
 
@@ -116,6 +116,67 @@ def test_inference_engine():
     print("  PASS")
 
 
+def test_metacognitive_engine():
+    print("\n-- Metacognitive Engine (GWT + TRAP + HOT + MSV) --")
+    from src.model.metacognitive_engine import MetacognitiveWorkspace
+
+    workspace = MetacognitiveWorkspace()
+
+    # Evaluate 3 sample lines
+    candidates = [
+        "I been movin' in silence, they can't feel my weight",
+        "Gold chains and fast lanes, running with the night",
+        "Remember when we had nothing but dreams in our pockets",
+    ]
+    traces = workspace.evaluate_candidates(
+        candidates=candidates,
+        genre="hip_hop",
+        section="verse1",
+        mood="dark",
+        target_end_phoneme=None,
+        previous_line=None,
+        accepted_lines=[],
+        line_idx=0,
+        tension_state=0.3,
+        target_syllables=10,
+    )
+
+    assert len(traces) == 3, f"Expected 3 traces, got {len(traces)}"
+    print(f"  Traces generated   : {len(traces)}")
+
+    best = traces[0]
+    print(f"  Best line          : {best.line[:60]}")
+    print(f"  Total score        : {best.total_score:.3f}")
+    print(f"  System mode        : {best.system_mode}")
+    print(f"  Decision           : {best.decision}")
+    print(f"  Module scores      : { {k: round(v, 2) for k, v in best.module_scores.items()} }")
+    print(f"  Winning modules    : {best.winning_modules}")
+    print(f"  Flags              : {best.all_flags[:5]}")
+
+    # Validate all 7 modules produced scores
+    expected_modules = {"phonology", "stress", "emotion", "semantic", "structure", "texture", "dopamine"}
+    actual_modules = set(best.module_scores.keys())
+    assert expected_modules == actual_modules, f"Missing modules: {expected_modules - actual_modules}"
+    print(f"  All 7 modules: PASS")
+
+    # Validate per-module reasoning exists
+    assert all(best.module_reasoning.get(m) for m in expected_modules), "Missing reasoning"
+    print(f"  Module reasoning: PASS")
+
+    # Validate System 2 mode for cold start (no accepted lines = low experience_match)
+    # This is correct behavior: unfamiliar territory = DLPFC deliberative mode
+    assert best.system_mode == "system2", f"Expected system2 for cold start, got {best.system_mode}"
+    print(f"  System 2 for cold start: PASS (correct - unfamiliar territory)")
+
+    # Test self-model learning
+    workspace.accept_line(best)
+    report = workspace.get_session_report()
+    assert report["total_generations"] == 1
+    print(f"  Self-model learning: PASS")
+
+    print("  PASS")
+
+
 if __name__ == "__main__":
     import traceback
     tests = [
@@ -126,6 +187,7 @@ if __name__ == "__main__":
         test_phonetic_head,
         test_lyrics_model,
         test_inference_engine,
+        test_metacognitive_engine,
     ]
     passed = 0
     failed = 0
