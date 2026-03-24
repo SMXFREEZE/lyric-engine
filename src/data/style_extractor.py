@@ -182,7 +182,8 @@ def build_style_vectors(
             feature_names=[f"f{i}" for i in range(128)],
         )
         style_vectors[artist] = sv
-        np.save(out_path / f"{artist.replace(' ', '_')}.npy", vec)
+        safe_name = re.sub(r'[^\w\-]', '_', artist)
+        np.save(out_path / f"{safe_name}.npy", vec)
 
     print(f"\nSaved {len(style_vectors)} style vectors → {out_path}")
     return style_vectors
