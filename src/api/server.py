@@ -126,7 +126,6 @@ def generate(req: GenerateRequest):
     from src.inference.engine import SongMemory, LyricsEngine
     from src.data.phoneme_annotator import annotate_line, annotation_to_dict
     from src.data.rhyme_labeler import detect_scheme
-    import numpy as np
 
     if req.genre not in GENRES:
         raise HTTPException(400, f"Unknown genre '{req.genre}'. Valid: {GENRES}")
