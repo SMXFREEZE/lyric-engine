@@ -54,25 +54,52 @@ Emits top-1 in auto mode, top-3 in co-write mode.
 ## Project structure
 
 ```
+configs/
+└── genres.py               # Genre registry and style descriptions
+scripts/
+├── smoke_test.py           # Full pipeline test with GPT-2, no GPU needed
+├── infinite_crawl.py       # Continuous Genius scraping loop
+└── rewrite_train_notebook.py
+notebooks/
+├── train_colab.ipynb       # Training on Google Colab
+├── train_kaggle.ipynb      # Training on Kaggle (T4/P100)
+├── run_ai_drive.ipynb      # Inference on Google Drive checkpoint
+└── run_ai_kaggle.ipynb     # Inference on Kaggle checkpoint
 src/
 ├── data/
-│   ├── scraper.py          # Genius API lyrics collection (~5M songs)
+│   ├── scraper.py          # Genius API lyrics collection
+│   ├── chart_scraper.py    # Billboard/Deezer/iTunes chart scraping
 │   ├── phoneme_annotator.py # CMU dict + rule-based stress/syllable tagging
 │   ├── rhyme_labeler.py    # Phoneme edit-distance rhyme scheme detection
 │   ├── valence_scorer.py   # Per-line valence/arousal + arc token assignment
-│   └── style_extractor.py  # 128-dim artist style vector extraction
+│   ├── style_extractor.py  # 128-dim artist style vector extraction
+│   ├── style_dna.py        # Artist DNA fingerprinting
+│   └── viral_analyzer.py   # Viral chart signal extraction
 ├── model/
 │   ├── dual_tokenizer.py   # BPE + ARPAbet parallel token streams
 │   ├── phonetic_head.py    # Auxiliary MLP for constrained decoding
-│   └── lyrics_model.py     # Full model: LLM + LoRA + style projector + phonetic head
+│   ├── lyrics_model.py     # Full model: LLM + LoRA + style projector + phonetic head
+│   ├── emotional_geometry.py # 8D emotional space + trajectory engine
+│   ├── phonosemantic.py    # Sound-meaning alignment (phoneme -> texture)
+│   ├── dopamine_arc.py     # Tension-release curve + goosebump predictor
+│   ├── metacognitive_engine.py # 9-module workspace (GWT/HOT/MSV/ACC/SMA)
+│   └── research_scoring.py # Signals from peer-reviewed musicology papers
+├── generation/
+│   ├── flow_dna.py         # 8 canonical flow templates (trap/melodic/etc.)
+│   └── surprise_engine.py  # Predictive surprise scorer (Huron PSR model)
 ├── training/
 │   ├── dataset.py          # Training format assembly + DataLoader
+│   ├── cortical_dataset.py # Cortical Creative Loop (CCL) training format
 │   ├── sft.py              # Stage 1 (general SFT) + Stage 2 (genre LoRAs)
 │   └── rlhf.py             # Stage 3: reward model + PPO via TRL
 ├── inference/
 │   └── engine.py           # Constrained beam search + CoWriteSession
+├── audio/
+│   ├── instrumental_generator.py # MusicGen beat generation (40+ style prompts)
+│   ├── vocal_generator.py  # Bark vocal/rap generation (multi-language)
+│   └── song_assembler.py   # Full song pipeline: mix, arrange, export MP3
 └── api/
-    └── server.py           # FastAPI: /generate, /cowrite/*, /health
+    └── server.py           # FastAPI: /generate, /cowrite/*, /health, /genres
 ```
 
 ## Supported genres
@@ -128,18 +155,26 @@ curl -X POST http://localhost:8000/generate \
 ```bash
 # Start a session
 curl -X POST http://localhost:8000/cowrite/start \
+  -H "Content-Type: application/json" \
   -d '{"genre": "rnb", "rhyme_scheme": "ABAB"}'
-# → {"session_id": "abc-123"}
+# -> {"session_id": "abc-123"}
 
 # Get 3 suggestions for the next line
 curl -X POST http://localhost:8000/cowrite/suggest \
+  -H "Content-Type: application/json" \
   -d '{"session_id": "abc-123", "n": 3}'
 
 # Accept a line (model updates context for next generation)
 curl -X POST http://localhost:8000/cowrite/accept \
+  -H "Content-Type: application/json" \
   -d '{"session_id": "abc-123", "line": "I been moving in silence"}'
-```
 
+# Get the full song so far
+curl http://localhost:8000/cowrite/song/abc-123
+
+# End the session
+curl -X DELETE http://localhost:8000/cowrite/session/abc-123
+```
 ## Production serving
 
 ```
