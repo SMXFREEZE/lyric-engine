@@ -36,7 +36,7 @@ def test_rhyme_labeler():
 
 
 def test_valence_scorer():
-    print("\n--Valence Scorer --")
+    print("\n-- Valence Scorer --")
     from src.data.valence_scorer import score_line
     em = score_line("I been movin' in silence, they can't feel my weight")
     print(f"  Valence : {em.valence:+.3f}")
@@ -46,7 +46,7 @@ def test_valence_scorer():
 
 
 def test_dual_tokenizer():
-    print("\n--Dual Tokenizer (offline, GPT-2) --")
+    print("\n-- Dual Tokenizer (offline, GPT-2) --")
     from src.model.dual_tokenizer import OfflineDualTokenizer
     tok = OfflineDualTokenizer()
     enc = tok.encode("I been movin' in silence, they can't feel my weight")
@@ -57,7 +57,7 @@ def test_dual_tokenizer():
 
 
 def test_phonetic_head():
-    print("\n--Phonetic Head --")
+    print("\n-- Phonetic Head --")
     import torch
     from src.model.phonetic_head import PhoneticHead, PhoneticConstraintScorer
     from src.model.dual_tokenizer import PHONEME_TO_ID
@@ -75,7 +75,7 @@ def test_phonetic_head():
 
 
 def test_lyrics_model():
-    print("\n--Lyrics Model (GPT-2) --")
+    print("\n-- Lyrics Model (GPT-2) --")
     import torch
     from src.model.lyrics_model import load_base_model, LyricsModel
 
