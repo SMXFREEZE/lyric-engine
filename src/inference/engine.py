@@ -391,27 +391,45 @@ class LyricsEngine:
         6. SelfModel (TRAP) learns per-module reliability for this session
         """
         prompt = memory.build_prompt()
-        candidates = self.generate_candidates(prompt)
-
         line_idx = len(memory.accepted_lines)
 
         # Current arc token (last section's arc)
         arc_token = memory.sections[-1][0] if memory.sections else "[BUILD]"
+        target_ep = memory.get_target_end_phoneme()
 
-        # Route through the Metacognitive Workspace (GWT + TRAP + HOT + MSV)
-        traces = self.workspace.evaluate_candidates(
-            candidates=candidates,
-            genre=memory.genre,
-            section=section,
-            mood=memory.mood,
-            target_end_phoneme=memory.get_target_end_phoneme(),
-            previous_line=memory.accepted_lines[-1] if memory.accepted_lines else None,
-            accepted_lines=memory.accepted_lines,
-            line_idx=line_idx,
-            tension_state=memory.tension_curve.current,
-            target_syllables=memory.target_syllables,
-            arc_token=arc_token,
-        )
+        def _evaluate(candidates: list[str]) -> list[GenerationTrace]:
+            # Route through the Metacognitive Workspace (GWT + TRAP + HOT + MSV)
+            return self.workspace.evaluate_candidates(
+                candidates=candidates,
+                genre=memory.genre,
+                section=section,
+                mood=memory.mood,
+                target_end_phoneme=target_ep,
+                previous_line=memory.accepted_lines[-1] if memory.accepted_lines else None,
+                accepted_lines=memory.accepted_lines,
+                line_idx=line_idx,
+                tension_state=memory.tension_curve.current,
+                target_syllables=memory.target_syllables,
+                arc_token=arc_token,
+            )
+
+        traces = _evaluate(self.generate_candidates(prompt))
+
+        # HARD RHYME FILTER — this is sample-then-rerank, so enforcement means
+        # rejection: when the scheme requires a rhyme, candidates flagged
+        # RHYME_MISS by the phonology module are discarded. If no candidate
+        # rhymes, one more batch is sampled; only if that also fails does the
+        # engine fall back to the best-scoring line so callers always get
+        # output (the miss stays visible in the trace flags).
+        if target_ep is not None:
+            rhyming = [t for t in traces if "RHYME_MISS" not in t.all_flags]
+            if not rhyming:
+                traces = traces + _evaluate(self.generate_candidates(prompt))
+                rhyming = [t for t in traces if "RHYME_MISS" not in t.all_flags]
+            traces = sorted(
+                rhyming or traces, key=lambda t: t.total_score, reverse=True,
+            )
+
         self.last_traces = traces
 
         # Convert GenerationTraces to CandidateScore for backward compatibility
