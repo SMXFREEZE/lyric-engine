@@ -153,11 +153,14 @@ def test_metacognitive_engine():
     print(f"  Winning modules    : {best.winning_modules}")
     print(f"  Flags              : {best.all_flags[:5]}")
 
-    # Validate all 7 modules produced scores
-    expected_modules = {"phonology", "stress", "emotion", "semantic", "structure", "texture", "dopamine"}
+    # Validate all 9 modules produced scores
+    expected_modules = {
+        "phonology", "stress", "emotion", "semantic", "structure",
+        "texture", "dopamine", "surprise", "flow",
+    }
     actual_modules = set(best.module_scores.keys())
     assert expected_modules == actual_modules, f"Missing modules: {expected_modules - actual_modules}"
-    print(f"  All 7 modules: PASS")
+    print(f"  All 9 modules: PASS")
 
     # Validate per-module reasoning exists
     assert all(best.module_reasoning.get(m) for m in expected_modules), "Missing reasoning"

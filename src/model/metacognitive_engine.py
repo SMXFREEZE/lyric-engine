@@ -15,7 +15,7 @@ Implements four cognitive science frameworks:
   The brain has many specialized, parallel, unconscious modules. Consciousness
   is what happens when ONE module's output wins a competition for access to a
   shared "workspace" and is broadcast system-wide.
-  -> Here: 7 specialized modules run in parallel. The workspace selects the
+  -> Here: 9 specialized modules run in parallel. The workspace selects the
      winner with a justification trace and broadcasts the result.
 
 [TRAP] Metacognitive AI Framework (arxiv 2406.12147)
@@ -42,10 +42,11 @@ ARCHITECTURE
 ------------
   +---------------------------------------------------------------+
   |              PARALLEL SPECIALIZED MODULES                      |
-  | Phonology  Stress  Emotion  Semantic  Structure  Texture  Dopa |
+  |  Phonology  Stress  Emotion  Semantic  Structure               |
+  |  Texture  Dopamine  Surprise  Flow                             |
   | (each: score, confidence, flags, reasoning)                    |
   +-----------------------------+---------------------------------+
-                                |  7 parallel outputs
+                                |  9 parallel outputs
   +-----------------------------v---------------------------------+
   |                 GLOBAL WORKSPACE LAYER                        |
   |  - Collects all module outputs                                |
@@ -118,7 +119,8 @@ class ModuleOutput:
 
 
 # =============================================================================
-#  PART 2: THE 7 SPECIALIZED MODULES - parallel unconscious processors
+#  PART 2: THE SPECIALIZED MODULES - parallel unconscious processors
+#  (7 core modules here; Surprise and Flow live in Parts 5b/5c — 9 total)
 # =============================================================================
 # Each mirrors a specific brain region/function from the neuroscience research:
 #   Phonology  -> inferior frontal gyrus + supramarginal gyrus (phonological loop)
@@ -551,7 +553,9 @@ class MetacognitiveStateVector:
             return "system2"
         if self.task_importance > 0.75:
             return "system2"
-        if self.experience_match < 0.30:
+        # Inclusive threshold: a cold start sets experience_match exactly to
+        # 0.30, and unfamiliar territory must engage the deliberative mode.
+        if self.experience_match <= 0.30:
             return "system2"
         return "system1"
 
@@ -1139,7 +1143,7 @@ class MetacognitiveWorkspace:
         full cognitive architecture.
 
         This is the complete brain process in one call:
-        1. Run all 7 modules in parallel on every candidate
+        1. Run all 9 modules in parallel on every candidate
         2. Compute the Metacognitive State Vector (System 1/2 decision)
         3. Apply self-model weight adjustments (TRAP Adaptation)
         4. Global workspace selection: rank candidates with justification traces

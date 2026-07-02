@@ -524,7 +524,7 @@ class LyricsEngine:
 
         Flow:
         1. LLM generates raw candidates (two-phase divergent/convergent)
-        2. MetacognitiveWorkspace runs all 7 specialized modules in parallel
+        2. MetacognitiveWorkspace runs all 9 specialized modules in parallel
         3. MSV determines System 1 (creative) vs System 2 (deliberative)
         4. Global Workspace selects winner with justification trace (GWT)
         5. GenerationTrace (HOT) records what was generated and why
