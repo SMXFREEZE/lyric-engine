@@ -54,14 +54,27 @@ def get_engine():
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
-    title="God-Tier Lyrics LLM",
+    title="Lyric Engine API",
     description="Phonetic-aware, genre-native lyrics generation",
     version="0.1.0",
 )
 
+# CORS: localhost dev origins by default; add production origins via the
+# CORS_ORIGINS env var (comma-separated), e.g.
+#   CORS_ORIGINS=https://app.example.com,https://staging.example.com
+_DEFAULT_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8080",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:8080",
+]
+_env_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_DEFAULT_ORIGINS + _env_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
