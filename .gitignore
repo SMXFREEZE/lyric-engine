@@ -40,3 +40,8 @@ checkpoints/
 # OS
 .DS_Store
 Thumbs.db
+
+# Virtualenv / test caches
+.venv/
+venv/
+.pytest_cache/
