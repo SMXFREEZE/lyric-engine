@@ -23,6 +23,7 @@ CCL Training format:
 
 import json
 import random
+import re
 from pathlib import Path
 from typing import Optional
 from collections import Counter
@@ -37,9 +38,9 @@ from src.data.rhyme_labeler import detect_scheme
 from src.model.dual_tokenizer import word_to_phoneme_ids, PHONEME_TO_ID
 
 
-SECTION_HEADER_RE = __import__("re").compile(
+SECTION_HEADER_RE = re.compile(
     r"^\[(verse|chorus|prechorus|bridge|hook|outro|intro)\]",
-    __import__("re").IGNORECASE
+    re.IGNORECASE,
 )
 
 

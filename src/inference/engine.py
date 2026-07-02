@@ -1,34 +1,19 @@
 """
-Inference engine: constrained beam search for god-tier lyrics.
+Inference engine: sample-then-rerank lyric generation.
 
 Per-line generation flow:
   1. Build context: [genre token + LoRA] + [style prefix] + [section/arc tokens] + [accepted lines]
   2. Generate beam_size=8 candidate lines (DIVERGENT phase — high temperature, unconstrained)
      Mirrors: MPFC-active creative generation phase in professional rappers [PMC3498928]
-  3. Post-score each candidate (CONVERGENT phase — full constraint battery):
-     ORIGINAL:
-       - phonetic constraint: end-rhyme match
-       - syllable count: hard filter ±3
-       - novelty: lexical overlap with accepted lines
-       - valence fit: emotional arc target
-     COGNITIVE ENGINE (emotional_geometry + phonosemantic + dopamine_arc):
-       - 8D emotional trajectory fit
-       - phonosemantic texture alignment (sound matches mood)
-       - goosebump predictor (tension × emotional jump × hook DNA)
-     RESEARCH-BACKED (research_scoring — 7 signals from peer-reviewed findings):
-       - polysyllabic rhyme depth (biggest quality predictor, arXiv:2505.00035)
-       - internal rhyme density (doubled in top artists since 2000)
-       - quadratic complexity calibrator (optimal ~65th percentile)
-       - 8-bar temporal arc weighting (final 2 bars = resolution priority)
-       - introspection/confessional bonus (surged 246% in modern hip-hop)
-       - vocabulary novelty (recency-weighted TTR)
-       - rhythmic stress alignment (motor-rhythm coupling, PMC3498928)
+  3. Rerank each candidate through the MetacognitiveWorkspace — 9 specialized
+     modules scored in parallel (phonology, stress, emotion, semantic,
+     structure, texture, dopamine, surprise, flow), combined by the global
+     workspace with a justification trace per candidate.
   4. Emit top-1 (auto) or top-3 (co-write mode)
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -37,16 +22,9 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 from transformers import LogitsProcessor, LogitsProcessorList
 
-from src.data.phoneme_annotator import annotate_line, LineAnnotation
-from src.data.rhyme_labeler import rhymes
-from src.data.valence_scorer import score_line, LineEmotion
-from src.model.dual_tokenizer import PHONEME_TO_ID, word_to_phoneme_ids
-from src.model.emotional_geometry import trajectory_fit_score, compute_song_arc
-from src.model.phonosemantic import texture_alignment_score
-from src.model.dopamine_arc import (
-    goosebump_potential, hook_dna_score, TensionCurve, analyze_song_dopamine,
-)
-from src.model.research_scoring import research_score
+from src.data.phoneme_annotator import annotate_line
+from src.model.emotional_geometry import compute_song_arc
+from src.model.dopamine_arc import TensionCurve, analyze_song_dopamine
 from src.model.metacognitive_engine import MetacognitiveWorkspace, GenerationTrace
 
 
@@ -162,6 +140,21 @@ class SongMemory:
             parts.append(line)
         return "\n".join(parts) + "\n"
 
+    def _style_syllable_basis(self) -> float:
+        """
+        Syllable-count basis used for rhythm conditioning in the prompt.
+
+        Style vectors (src/data/style_extractor.py) store the artist's mean
+        syllables-per-line in dim 0. When a style vector is attached, rhythm
+        conditioning follows the artist's real cadence; otherwise it falls
+        back to the requested target_syllables.
+        """
+        if self.style_vec is not None and len(self.style_vec) > 0:
+            avg_syl = float(self.style_vec[0])
+            if 4.0 <= avg_syl <= 24.0:  # sanity window for lyric lines
+                return avg_syl
+        return float(self.target_syllables)
+
     def _build_ccl_prompt(self) -> str:
         """Build CCL (Cortical Creative Loop) format prompt - matches training."""
         parts: list[str] = []
@@ -183,10 +176,11 @@ class SongMemory:
         }
         valence_label, arousal_label = mood_map.get(self.mood, ("neutral", "moderate"))
 
-        # Rhythm label from target syllables
-        if self.target_syllables >= 12:
+        # Rhythm label from the artist style vector (if loaded) or target syllables
+        syllable_basis = self._style_syllable_basis()
+        if syllable_basis >= 12:
             rhythm_label = "dense"
-        elif self.target_syllables >= 8:
+        elif syllable_basis >= 8:
             rhythm_label = "standard"
         else:
             rhythm_label = "sparse"
@@ -246,143 +240,6 @@ class CandidateScore:
     introspection:      float   # 0-1  confessional content signal
     stress_alignment:   float   # 0-1  motor-rhythm pattern
     total_score:        float
-
-
-def score_candidate(
-    line: str,
-    memory: SongMemory,
-    target_arc_valence: float = 0.0,
-    target_arc_arousal: float = 0.5,
-    section: str = "verse1",
-    mood: str = "dark",
-    tension_state: float = 0.3,
-    line_idx: int = 0,
-) -> CandidateScore:
-    ann = annotate_line(line)
-
-    # 1. Phonetic (rhyme) score
-    target_ep = memory.get_target_end_phoneme()
-    if target_ep is None:
-        phonetic_score = 1.0
-    elif ann.end_phoneme and rhymes(ann.end_phoneme, target_ep):
-        phonetic_score = 1.0
-    else:
-        phonetic_score = 0.0
-
-    # 2. Syllable check
-    syllable_ok = abs(ann.total_syllables - memory.target_syllables) <= 3
-
-    # 3. Novelty
-    def simple_overlap(a: str, b: str) -> float:
-        aw = set(a.lower().split())
-        bw = set(b.lower().split())
-        return len(aw & bw) / len(aw | bw) if (aw and bw) else 0.0
-
-    max_overlap = max(
-        (simple_overlap(line, prev) for prev in memory.accepted_lines),
-        default=0.0,
-    )
-    novelty_score = 1.0 - max_overlap
-
-    # 4. Simple valence fit (legacy, low weight)
-    emotion = score_line(line)
-    val_diff = abs(emotion.valence - target_arc_valence)
-    aro_diff = abs(emotion.arousal - target_arc_arousal)
-    valence_fit = 1.0 - (val_diff + aro_diff) / 4.0
-
-    # 5. 8D Emotional geometry trajectory fit
-    try:
-        traj_fit = trajectory_fit_score(line, memory.genre, section)
-    except Exception:
-        traj_fit = valence_fit  # graceful fallback
-
-    # 6. Phonosemantic texture alignment
-    try:
-        tex_align = texture_alignment_score(line, mood, section)
-    except Exception:
-        tex_align = 0.5
-
-    # 7. Dopamine / goosebump potential
-    prev_line = memory.accepted_lines[-1] if memory.accepted_lines else None
-    try:
-        gbump = goosebump_potential(line, tension_state, prev_line, mood)
-    except Exception:
-        gbump = 0.0
-
-    # 8. Hook DNA
-    try:
-        hook = hook_dna_score(line, prev_line)
-    except Exception:
-        hook = 0.0
-
-    # 9-15. Research-backed scores (7 signals from peer-reviewed papers)
-    target_ep = memory.get_target_end_phoneme()
-    rhymes_target = bool(
-        ann.end_phoneme and target_ep and
-        __import__('src.data.rhyme_labeler', fromlist=['rhymes']).rhymes(ann.end_phoneme, target_ep)
-    ) if target_ep else True
-
-    try:
-        rs = research_score(
-            line=line,
-            line_idx=line_idx,
-            section=section,
-            recent_lines=memory.accepted_lines[-8:],
-            rhymes_with_target=rhymes_target,
-            tension_state=tension_state,
-            previous_line=prev_line,
-        )
-    except Exception:
-        rs = {
-            "polysyllabic_rhyme": 0.5, "internal_rhyme": 0.0,
-            "complexity": 0.5, "temporal_arc": 0.5, "introspection": 0.0,
-            "vocab_novelty": 0.5, "stress_alignment": 0.5,
-        }
-
-    # ── FINAL WEIGHTED SCORE ──────────────────────────────────────────────────
-    # Three-layer scoring:
-    #   Layer 1 (Original)  — ensures basic quality: rhyme, syllables, novelty
-    #   Layer 2 (Cognitive) — emotional geometry, texture, dopamine prediction
-    #   Layer 3 (Research)  — polysyllabic rhyme, internal rhyme, complexity arc
-    total = (
-        # Layer 1: basic quality (30%)
-        0.12 * phonetic_score
-        + 0.08 * (1.0 if syllable_ok else 0.0)
-        + 0.05 * novelty_score
-        + 0.05 * valence_fit
-        # Layer 2: cognitive music engine (35%)
-        + 0.12 * traj_fit
-        + 0.08 * tex_align
-        + 0.10 * gbump
-        + 0.05 * hook
-        # Layer 3: research-backed (35%)
-        + 0.10 * rs["polysyllabic_rhyme"]
-        + 0.07 * rs["internal_rhyme"]
-        + 0.05 * rs["complexity"]
-        + 0.05 * rs["temporal_arc"]
-        + 0.04 * rs["introspection"]
-        + 0.03 * rs["vocab_novelty"]
-        + 0.01 * rs["stress_alignment"]
-    )
-
-    return CandidateScore(
-        text=line,
-        phonetic_score=phonetic_score,
-        syllable_ok=syllable_ok,
-        novelty_score=novelty_score,
-        valence_fit=valence_fit,
-        trajectory_fit=traj_fit,
-        texture_alignment=tex_align,
-        goosebump=gbump,
-        hook_dna=hook,
-        polysyllabic_rhyme=rs["polysyllabic_rhyme"],
-        internal_rhyme=rs["internal_rhyme"],
-        complexity=rs["complexity"],
-        temporal_arc=rs["temporal_arc"],
-        introspection=rs["introspection"],
-        stress_alignment=rs["stress_alignment"],
-        total_score=float(total),
-    )
 
 
 # ── Generation engine ─────────────────────────────────────────────────────────

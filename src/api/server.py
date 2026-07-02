@@ -32,8 +32,10 @@ _sessions: dict[str, object] = {}   # session_id → CoWriteSession
 def get_engine():
     global _engine
     if _engine is None:
+        import torch  # deferred: keeps server importable without torch installed
+
         model_path = os.getenv("LYRICS_MODEL_PATH", "gpt2")
-        device = "cuda" if __import__("torch").cuda.is_available() else "cpu"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"[server] Loading model: {model_path} on {device}")
 
         from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -41,7 +43,7 @@ def get_engine():
         tok.pad_token = tok.eos_token
         mdl = AutoModelForCausalLM.from_pretrained(
             model_path,
-            torch_dtype=__import__("torch").bfloat16 if device == "cuda" else __import__("torch").float32,
+            torch_dtype=torch.bfloat16 if device == "cuda" else torch.float32,
         )
         from src.inference.engine import LyricsEngine
         _engine = LyricsEngine(mdl, tok, device=device, beam_size=int(os.getenv("BEAM_SIZE", "8")))

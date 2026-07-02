@@ -71,7 +71,6 @@ ARCHITECTURE
 
 from __future__ import annotations
 
-import math
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -96,7 +95,7 @@ from src.model.research_scoring import (
     stress_alignment_score,
 )
 from src.generation.surprise_engine import surprise_score, diagnose as surprise_diagnose
-from src.generation.flow_dna import flow_score, diagnose as flow_diagnose
+from src.generation.flow_dna import diagnose as flow_diagnose
 
 
 # =============================================================================

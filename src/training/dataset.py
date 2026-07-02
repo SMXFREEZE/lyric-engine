@@ -16,6 +16,7 @@ Phoneme IDs are stored as a parallel sequence for the phonetic head.
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -31,7 +32,9 @@ from src.data.valence_scorer import score_lyrics, compute_song_arc
 from src.model.dual_tokenizer import word_to_phoneme_ids, PHONEME_TO_ID
 
 
-SECTION_HEADER_RE = __import__("re").compile(r"^\[(verse|chorus|prechorus|bridge|hook|outro)\]", __import__("re").IGNORECASE)
+SECTION_HEADER_RE = re.compile(
+    r"^\[(verse|chorus|prechorus|bridge|hook|outro)\]", re.IGNORECASE
+)
 
 
 def split_into_sections(lyrics: str) -> list[tuple[str, list[str]]]:
