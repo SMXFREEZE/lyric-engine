@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      # Pure-Python deps only — no torch, no GPU, no model downloads.
+      # Model-dependent test paths are mocked or skipped (see tests/conftest.py).
+      - name: Install test dependencies
+        run: pip install -r requirements-ci.txt
+
+      - name: Byte-compile all sources
+        run: |
+          find src scripts configs tests -name '*.py' -print0 \
+            | xargs -0 python -m py_compile
+
+      - name: Run tests
+        run: python -m pytest tests
