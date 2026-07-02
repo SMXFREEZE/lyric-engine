@@ -1,0 +1,8 @@
+# Audio generation stack (src/audio/*) — instrumental + vocal rendering.
+# Install on top of requirements.txt:  pip install -r requirements-audio.txt
+
+audiocraft>=1.3.0          # Meta MusicGen — instrumental generation
+suno-bark>=0.0.1a0         # Bark — vocal/topline generation
+pydub>=0.25.1              # Audio mixing and MP3 export
+soundfile>=0.12.1          # WAV read/write
+scipy>=1.11.0              # Resampling (song_assembler)
