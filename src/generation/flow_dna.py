@@ -148,13 +148,11 @@ def _extract_stress(line: str) -> str:
     """
     Extract binary stress pattern from a line using CMU phoneme data.
     Returns a string like "10100110".
+
+    Delegates to the annotator's per-syllable stress derivation (CMU stress
+    digits on vowel phonemes), so "silence" -> "10" and "guitar" -> "01".
     """
-    ann = annotate_line(line)
-    parts: list[str] = []
-    for wp in ann.words:
-        for i in range(wp.syllable_count):
-            parts.append("1" if i == wp.stress else "0")
-    return "".join(parts)
+    return annotate_line(line).stress_pattern
 
 
 def _lcs_similarity(a: str, b: str) -> float:

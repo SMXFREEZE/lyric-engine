@@ -3,7 +3,9 @@ Phoneme annotation pipeline.
 For each word in a lyric line: looks up CMU Pronouncing Dictionary,
 falls back to rule-based estimation for unknown words.
 
-Output per word: {word, phonemes: [...], stress: int (0/1/2), syllable_count: int}
+Output per word: {word, phonemes: [...], stress: int (phoneme index of the
+primary-stressed vowel, -1 if none), syllable_count: int, syllable_stress:
+per-syllable binary stress string derived from CMU stress digits}.
 """
 
 import re
@@ -33,9 +35,31 @@ def count_syllables_rule(word: str) -> int:
 class WordPhoneme:
     word: str
     phonemes: list[str]       # e.g. ["M", "UW1", "V", "IH0", "NG"]
-    stress: int               # primary stress position (index in phonemes), -1 if none
+    stress: int               # primary stress position (index in PHONEMES), -1 if none
     syllable_count: int
     from_cmu: bool            # True = CMU dict hit, False = estimated
+    syllable_stress: str = "" # per-SYLLABLE binary stress, e.g. "10" for "silence"
+
+
+_STRESSED_DIGITS = {"1", "2"}  # primary + secondary stress both count as stressed
+
+
+def syllable_stress_from_phones(phones: list[str]) -> str:
+    """
+    Derive a per-syllable binary stress string from CMU/ARPAbet phonemes.
+
+    CMU marks stress as a digit suffix on VOWEL phonemes (0 = unstressed,
+    1 = primary, 2 = secondary), and each vowel phoneme is one syllable:
+      "silence"  S AY1 L AH0 N S    -> "10"
+      "guitar"   G IH0 T AA1 R      -> "01"
+      "banana"   B AH0 N AE1 N AH0  -> "010"
+    Secondary stress is treated as stressed for rhythm purposes.
+    """
+    out = []
+    for p in phones:
+        if p and p[-1].isdigit():
+            out.append("1" if p[-1] in _STRESSED_DIGITS else "0")
+    return "".join(out)
 
 
 def get_word_phoneme(word: str) -> WordPhoneme:
@@ -45,7 +69,7 @@ def get_word_phoneme(word: str) -> WordPhoneme:
     if phones_list:
         phones = phones_list[0].split()
         syllables = pronouncing.syllable_count(phones_list[0])
-        # Find primary stress (1) position
+        # Find primary stress (1) position (index into the PHONEME list)
         stress_pos = next(
             (i for i, p in enumerate(phones) if p.endswith("1")), -1
         )
@@ -55,9 +79,10 @@ def get_word_phoneme(word: str) -> WordPhoneme:
             stress=stress_pos,
             syllable_count=syllables,
             from_cmu=True,
+            syllable_stress=syllable_stress_from_phones(phones),
         )
     else:
-        # Rule-based fallback
+        # Rule-based fallback: assume initial stress (most common in English)
         syl = count_syllables_rule(clean)
         return WordPhoneme(
             word=word,
@@ -65,6 +90,7 @@ def get_word_phoneme(word: str) -> WordPhoneme:
             stress=0,
             syllable_count=syl,
             from_cmu=False,
+            syllable_stress="1" + "0" * (syl - 1) if syl > 0 else "",
         )
 
 
@@ -96,11 +122,15 @@ def annotate_line(line: str) -> LineAnnotation:
 
     total_syl = sum(w.syllable_count for w in word_phonemes)
 
-    # Build stress pattern string across all syllables
+    # Build stress pattern string across all syllables.
+    # Uses CMU stress digits on vowel phonemes (via WordPhoneme.syllable_stress),
+    # so "guitar" contributes "01" and "silence" contributes "10".
     stress_chars = []
     for wp in word_phonemes:
-        for i in range(wp.syllable_count):
-            stress_chars.append("1" if i == 0 and wp.stress >= 0 else "0")
+        s = wp.syllable_stress
+        if len(s) != wp.syllable_count:  # defensive: keep pattern aligned
+            s = (s + "0" * wp.syllable_count)[: wp.syllable_count]
+        stress_chars.append(s)
     stress_pattern = "".join(stress_chars)
 
     # End phoneme from last non-empty word
