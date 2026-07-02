@@ -1,12 +1,50 @@
 """
 Smoke test — runs locally with no GPU, no API keys.
-Tests the full pipeline with GPT-2 as the base model.
+Pure-Python components always run; model-dependent sections (torch /
+transformers / GPT-2 download) SKIP with a clear message when the local
+model stack is missing or broken, instead of crashing.
 
 Run: python scripts/smoke_test.py
 """
 
 import sys
 sys.path.insert(0, ".")
+
+
+class SkipTest(Exception):
+    """Raised by a test that cannot run in this environment."""
+
+
+def _skip_unless(what: str, probe):
+    """Run `probe`; convert any failure into a SKIP with a clear message.
+    Broken installs (e.g. torch/torchvision version mismatches) raise more
+    than ImportError, so every exception counts."""
+    try:
+        probe()
+    except Exception as e:
+        raise SkipTest(f"{what} ({e.__class__.__name__}: {e})")
+
+
+def _require_torch(what: str):
+    def probe():
+        import torch  # noqa: F401
+    _skip_unless(f"{what} needs a working torch install", probe)
+
+
+def _require_tokenizer_stack(what: str):
+    def probe():
+        from transformers import AutoTokenizer  # noqa: F401
+    _skip_unless(f"{what} needs a working transformers install", probe)
+
+
+def _require_model_stack(what: str):
+    def probe():
+        import torch  # noqa: F401
+        # PreTrainedModel pulls in modeling_utils -> torchvision, which is
+        # exactly the path that breaks on mismatched torch/torchvision.
+        from transformers import PreTrainedModel, AutoModelForCausalLM  # noqa: F401
+    _skip_unless(f"{what} needs a working torch/transformers install", probe)
+
 
 def test_phoneme_annotator():
     print("\n-- Phoneme Annotator --")
@@ -16,6 +54,10 @@ def test_phoneme_annotator():
     print(f"  End phoneme : {ann.end_phoneme}")
     print(f"  Stress      : {ann.stress_pattern}")
     assert ann.total_syllables > 0
+    # Regression: per-syllable stress must come from CMU vowel digits
+    assert annotate_line("silence").stress_pattern == "10"
+    assert annotate_line("guitar").stress_pattern == "01"
+    assert annotate_line("banana").stress_pattern == "010"
     print("  PASS")
 
 
@@ -45,8 +87,21 @@ def test_valence_scorer():
     print("  PASS")
 
 
+def test_flow_dna():
+    print("\n-- Flow DNA --")
+    from src.generation.flow_dna import diagnose
+    d = diagnose("I been movin' in silence, they can't feel my weight",
+                 section="VERSE", arc_token="[BUILD]")
+    print(f"  Target flow : {d['target_flow']}")
+    print(f"  Score       : {d['score']:.3f}")
+    print(f"  Stress      : {d['actual_stress']}")
+    assert 0.0 <= d["score"] <= 1.0
+    print("  PASS")
+
+
 def test_dual_tokenizer():
     print("\n-- Dual Tokenizer (offline, GPT-2) --")
+    _require_tokenizer_stack("Dual tokenizer (GPT-2 BPE stream)")
     from src.model.dual_tokenizer import OfflineDualTokenizer
     tok = OfflineDualTokenizer()
     enc = tok.encode("I been movin' in silence, they can't feel my weight")
@@ -58,6 +113,8 @@ def test_dual_tokenizer():
 
 def test_phonetic_head():
     print("\n-- Phonetic Head --")
+    _require_torch("Phonetic head (torch MLP)")
+    _require_tokenizer_stack("Phonetic head (phoneme vocab)")
     import torch
     from src.model.phonetic_head import PhoneticHead, PhoneticConstraintScorer
     from src.model.dual_tokenizer import PHONEME_TO_ID
@@ -76,6 +133,7 @@ def test_phonetic_head():
 
 def test_lyrics_model():
     print("\n-- Lyrics Model (GPT-2) --")
+    _require_model_stack("LyricsModel (GPT-2 + LoRA + phonetic head)")
     import torch
     from src.model.lyrics_model import load_base_model, LyricsModel
 
@@ -97,6 +155,7 @@ def test_lyrics_model():
 
 def test_inference_engine():
     print("\n-- Inference Engine (GPT-2, 3 beams, metacognitive workspace) --")
+    _require_model_stack("Inference engine (GPT-2 generation)")
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from src.inference.engine import LyricsEngine, SongMemory
 
@@ -186,24 +245,29 @@ if __name__ == "__main__":
         test_phoneme_annotator,
         test_rhyme_labeler,
         test_valence_scorer,
+        test_flow_dna,
+        test_metacognitive_engine,
         test_dual_tokenizer,
         test_phonetic_head,
         test_lyrics_model,
         test_inference_engine,
-        test_metacognitive_engine,
     ]
     passed = 0
     failed = 0
+    skipped = 0
     for t in tests:
         try:
             t()
             passed += 1
+        except SkipTest as e:
+            print(f"  SKIP: {e}")
+            skipped += 1
         except Exception as e:
             print(f"  FAIL: {e}")
             traceback.print_exc()
             failed += 1
 
     print(f"\n{'='*40}")
-    print(f"Results: {passed} passed, {failed} failed")
+    print(f"Results: {passed} passed, {failed} failed, {skipped} skipped")
     if failed:
         sys.exit(1)
