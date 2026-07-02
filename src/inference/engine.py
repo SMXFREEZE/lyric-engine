@@ -413,6 +413,9 @@ class LyricsEngine:
         # Initialize the Metacognitive Workspace (GWT + TRAP + HOT + MSV)
         self.workspace = MetacognitiveWorkspace()
         self.generation_traces: list[GenerationTrace] = []
+        # Traces from the most recent generate_line() call, so callers can
+        # accept a line without re-running the full workspace evaluation.
+        self.last_traces: list[GenerationTrace] = []
 
     @torch.no_grad()
     def generate_candidates(
@@ -552,6 +555,7 @@ class LyricsEngine:
             target_syllables=memory.target_syllables,
             arc_token=arc_token,
         )
+        self.last_traces = traces
 
         # Convert GenerationTraces to CandidateScore for backward compatibility
         scored = []
@@ -615,20 +619,16 @@ class LyricsEngine:
                 best = top[0]
                 if auto_accept:
                     memory.add_line(best.text, section=section)
-                    # Record the generation trace for session awareness (HOT + TRAP)
-                    traces = self.workspace.evaluate_candidates(
-                        candidates=[best.text],
-                        genre=memory.genre, section=section, mood=memory.mood,
-                        target_end_phoneme=memory.get_target_end_phoneme(),
-                        previous_line=memory.accepted_lines[-2] if len(memory.accepted_lines) > 1 else None,
-                        accepted_lines=memory.accepted_lines,
-                        line_idx=len(memory.accepted_lines) - 1,
-                        tension_state=memory.tension_curve.current,
-                        target_syllables=memory.target_syllables,
+                    # Reuse the trace already produced inside generate_line()
+                    # (which evaluated with the correct arc_token) instead of
+                    # re-running the full 9-module workspace on the same line.
+                    trace = next(
+                        (t for t in self.last_traces if t.line == best.text),
+                        None,
                     )
-                    if traces:
-                        self.workspace.accept_line(traces[0])
-                        self.generation_traces.append(traces[0])
+                    if trace is not None:
+                        self.workspace.accept_line(trace)
+                        self.generation_traces.append(trace)
                 generated_lines.append(best.text)
 
         return generated_lines
